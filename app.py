@@ -3,6 +3,20 @@ Main Streamlit application untuk FinScope.
 Aplikasi web untuk visualisasi dan forecasting data keuangan S&P 500.
 """
 
+import os
+import sys
+
+# Set max upload size to 200MB
+# This modifies sys.argv so Streamlit will read it during initialization
+if len(sys.argv) > 1:
+    # Check if maxUploadSize is already set
+    has_max_upload = any('maxUploadSize' in arg for arg in sys.argv)
+    if not has_max_upload:
+        sys.argv.insert(1, '--server.maxUploadSize=200')
+else:
+    # If no arguments, add it
+    sys.argv.append('--server.maxUploadSize=200')
+
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -58,9 +72,20 @@ from viz import (
     plot_decomposition_glass_stack,
     plot_seasonal_helix,
     plot_market_universe,
-    plot_what_if_terrain
+    plot_what_if_terrain,
+    # New forecasting visualizations
+    plot_fan_chart,
+    plot_seasonal_heatmap_matrix,
+    plot_regime_change
 )
 from utils import check_null_percentage, load_model
+from model_evaluation import (
+    evaluate_model_performance,
+    calculate_comprehensive_metrics,
+    plot_residual_analysis,
+    plot_forecast_accuracy_by_horizon,
+    generate_model_evaluation_report
+)
 
 # Safe wrapper functions untuk mencegah WebSocketClosedError
 def safe_streamlit_call(func, *args, **kwargs):
@@ -219,7 +244,8 @@ with st.sidebar:
         "🏠 Home",
         "📊 ETL Results",
         "🔍 Exploratory Data Analysis",
-        "🤖 Forecasting"
+        "🤖 Forecasting",
+        "📈 Model Evaluation"
     ]
     
     # Tentukan index halaman saat ini
@@ -392,20 +418,23 @@ elif page == "📊 ETL Results":
     )
     
     # Check file size before processing
+    # Downsampling AKTIF secara default untuk file > 50MB untuk optimasi memory
     enable_downsample = False
     if uploaded_file is not None:
         file_size_mb = uploaded_file.size / (1024 * 1024)
+        
+        # Validasi ukuran file - max 200MB
         if file_size_mb > 200:
             safe_error(f"⚠️ File terlalu besar ({file_size_mb:.2f} MB). Maksimal 200MB.")
             uploaded_file = None
         elif file_size_mb > 100:
             safe_warning(f"⚠️ File besar ({file_size_mb:.2f} MB). Proses mungkin memakan waktu lama.")
-        
-        # Downsampling option for large files (default: enabled for files >50MB)
-        if file_size_mb > 50:
-            enable_downsample = True
+            enable_downsample = True  # Aktif untuk file > 100MB
+        elif file_size_mb > 50:
+            safe_info(f"ℹ️ File sedang ({file_size_mb:.2f} MB). Downsampling aktif untuk performa optimal.")
+            enable_downsample = True  # Aktif untuk file > 50MB
         else:
-            enable_downsample = False
+            enable_downsample = False  # Tidak perlu downsampling untuk file kecil
     
     # Process ETL jika file baru di-upload
     if uploaded_file is not None:
@@ -415,28 +444,43 @@ elif page == "📊 ETL Results":
             
             with st.spinner("Memproses data... Mohon tunggu."):
                 try:
+                    # Validate file first
+                    if uploaded_file.size == 0:
+                        safe_error("❌ File kosong! Silakan upload file yang berisi data.")
+                        uploaded_file = None
+                        st.stop()
+                    
                     file_size_mb = uploaded_file.size / (1024 * 1024)
                     
-                    # For large files (>50MB), use optimized chunked reading with automatic downsampling
+                    # For large files (>50MB), use optimized chunked reading with downsampling
                     if file_size_mb > 50:
                         import io
                         import gc
                         from utils import downsample_data
                         
-                        # Calculate target rows based on file size and downsampling option
+                        # Aktifkan downsampling dengan target_rows untuk menghindari MemoryError
                         if enable_downsample:
-                            # More aggressive downsampling for very large files
-                            if file_size_mb > 150:
-                                target_rows = 500000  # 500k rows max
-                            elif file_size_mb > 100:
-                                target_rows = 1000000  # 1M rows max
+                            # Downsampling agresif berdasarkan ukuran file
+                            if file_size_mb > 100:
+                                target_rows = 500000  # 500k rows untuk file besar (menghindari MemoryError)
                             else:
-                                target_rows = 2000000  # 2M rows max
+                                target_rows = 1000000  # 1M rows untuk file sedang
                         else:
-                            target_rows = 5000000  # 5M rows max
+                            # Jika downsampling tidak aktif, tetap batasi untuk file besar
+                            if file_size_mb > 100:
+                                target_rows = 1000000  # Force limit untuk file besar
+                            else:
+                                target_rows = None  # No limit untuk file kecil-medium
                         
-                        chunk_size = 30000  # Smaller chunks: 30k rows
-                        max_chunks = min(200, (target_rows // chunk_size) + 10)
+                        # Chunk size disesuaikan dengan ukuran file untuk optimasi memory
+                        if file_size_mb > 100:
+                            chunk_size = 30000  # Chunk lebih kecil untuk file besar
+                        elif file_size_mb > 50:
+                            chunk_size = 40000  # Chunk sedang untuk file sedang
+                        else:
+                            chunk_size = 50000  # Chunk normal
+                        
+                        max_chunks = None if target_rows is None else min(500, (target_rows // chunk_size) + 20)
                         
                         uploaded_file.seek(0)
                         
@@ -454,7 +498,10 @@ elif page == "📊 ETL Results":
                             # Start reading file
                             if status_text is not None:
                                 try:
-                                    status_text.text(f"📖 Membaca file (target: {target_rows:,} rows)...")
+                                    if target_rows is not None:
+                                        status_text.text(f"📖 Membaca file (target: {target_rows:,} rows dengan downsampling)...")
+                                    else:
+                                        status_text.text(f"📖 Membaca file (mengambil semua data dengan optimasi memory)...")
                                 except Exception:
                                     pass
                             
@@ -545,30 +592,33 @@ elif page == "📊 ETL Results":
                                     if chunk['Date'].dtype == 'object' or 'datetime' not in str(chunk['Date'].dtype).lower():
                                         chunk['Date'] = pd.to_datetime(chunk['Date'], errors='coerce')
                                 
-                                # Check if we've reached target rows
-                                if total_rows + len(chunk) > target_rows:
-                                    # Take only what we need (only copy if necessary)
+                                # Check if we've reached target rows (jika downsampling aktif)
+                                if target_rows is not None and total_rows + len(chunk) > target_rows:
+                                    # Take only what we need
                                     remaining_rows = target_rows - total_rows
                                     if remaining_rows > 0:
                                         chunk = chunk.iloc[:remaining_rows]
                                         chunk_list.append(chunk)
                                         total_rows += len(chunk)
-                                    break
+                                        break
                                 
                                 chunk_list.append(chunk)
                                 total_rows += len(chunk)
                                 
                                 # Update progress dengan jeda untuk mencegah WebSocket timeout
                                 if progress_bar is not None and i % 10 == 0:  # Update setiap 10 chunks
-                                    progress = min(100, int((total_rows / target_rows) * 90))
                                     try:
+                                        if target_rows is not None:
+                                            progress = min(95, int((total_rows / target_rows) * 90))
+                                        else:
+                                            progress = min(95, 10 + int((i / 200) * 85))
                                         progress_bar.progress(progress)
                                         time.sleep(0.01)  # Jeda kecil untuk mencegah WebSocket timeout
                                     except Exception:
                                         pass  # Ignore WebSocket errors during progress update
                                 
-                                # Stop if we've read enough chunks
-                                if i >= max_chunks - 1:
+                                # Stop if we've read enough chunks (jika ada limit)
+                                if max_chunks is not None and i >= max_chunks - 1:
                                     break
                                 
                                 # Aggressive memory cleanup every 3 chunks untuk file besar
@@ -630,10 +680,12 @@ elif page == "📊 ETL Results":
                                 except Exception:
                                     pass
                             
-                            # Additional downsampling if still too large
-                            if len(df_combined) > target_rows:
+                            # Additional downsampling if still too large (jika downsampling aktif)
+                            if target_rows is not None and len(df_combined) > target_rows:
                                 df_combined = downsample_data(df_combined, max_rows=target_rows)
-                                safe_info(f"📊 Data di-downsample menjadi {len(df_combined):,} rows untuk performa yang lebih baik.")
+                                safe_info(f"📊 Data di-downsample menjadi {len(df_combined):,} rows untuk menghindari MemoryError.")
+                            else:
+                                safe_info(f"📊 Data berhasil dimuat: {len(df_combined):,} rows")
                             
                             # Process ETL from dataframe with memory optimization
                             if status_text is not None:
@@ -702,8 +754,9 @@ elif page == "📊 ETL Results":
                                     status_text.empty()
                                 except Exception:
                                     pass
-                            safe_error("❌ Memory Error: File terlalu besar. Silakan gunakan file yang lebih kecil atau aktifkan downsampling.")
-                            safe_info("💡 Tips: File besar akan otomatis di-downsample untuk performa yang lebih baik.")
+                            safe_error("❌ Memory Error: File terlalu besar untuk diproses.")
+                            safe_info("💡 Downsampling sudah aktif secara otomatis untuk file > 50MB.")
+                            safe_info("💡 Solusi: Gunakan file yang lebih kecil (< 150MB) atau split file menjadi beberapa bagian.")
                             st.session_state.df_processed = None
                             st.session_state.metadata = {}
                         except Exception as e:
@@ -732,7 +785,9 @@ elif page == "📊 ETL Results":
                                     status_text.empty()
                                 except Exception:
                                     pass
-                    else:
+                    
+                    # Handle smaller files (<50MB)
+                    if file_size_mb <= 50:
                         # For smaller files, use temporary file approach
                         with tempfile.NamedTemporaryFile(delete=False, suffix='.csv') as tmp_file:
                             # Write in chunks to avoid loading entire file to memory
@@ -758,13 +813,20 @@ elif page == "📊 ETL Results":
                                     calculate_features=True,
                                     scale_close=should_scale_small
                                 )
-                            except (UnicodeDecodeError, ValueError) as e:
+                            except (UnicodeDecodeError, ValueError, pd.errors.ParserError) as e:
                                 # If encoding error, try with different encoding
                                 safe_warning(f"⚠️ Masalah encoding terdeteksi. Mencoba encoding alternatif...")
                                 # Re-read file with different encoding
                                 try:
                                     # Read with latin-1 encoding and save to new temp file
-                                    df_temp = pd.read_csv(tmp_path, encoding='latin-1', low_memory=True, on_bad_lines='skip')
+                                    df_temp = pd.read_csv(
+                                        tmp_path, 
+                                        encoding='latin-1', 
+                                        low_memory=True, 
+                                        on_bad_lines='skip',
+                                        engine='python',
+                                        sep=None
+                                    )
                                     tmp_path2 = tmp_path + '_latin1.csv'
                                     df_temp.to_csv(tmp_path2, index=False, encoding='utf-8')
                                     st.session_state.df_processed, st.session_state.metadata = process_etl(
@@ -795,16 +857,16 @@ elif page == "📊 ETL Results":
                                     os.unlink(tmp_path)
                                 except:
                                     pass
-                
                 except MemoryError:
-                    safe_error("❌ Memory Error: File terlalu besar untuk diproses. Silakan gunakan file yang lebih kecil atau aktifkan downsampling.")
+                    safe_error("❌ Memory Error: File terlalu besar untuk diproses. Silakan aktifkan downsampling atau gunakan file yang lebih kecil.")
+                    safe_info("💡 Tips: Aktifkan checkbox 'Aktifkan Downsampling' di atas untuk memproses file besar.")
                     st.session_state.df_processed = None
                     st.session_state.metadata = {}
                 except Exception as e:
                     safe_error(f"❌ Error memproses file: {str(e)}")
                     st.session_state.df_processed = None
                     st.session_state.metadata = {}
-    
+            
     st.markdown("---")
     
     if (st.session_state.df_processed is not None and 
@@ -1108,24 +1170,24 @@ elif page == "📊 ETL Results":
         # Filtered Data Summary (if filters applied)
         if selected_ticker_etl or (date_range_etl and len(date_range_etl) == 2):
             st.markdown("### 🔍 Data Setelah Filter")
-            col1, col2, col3, col4 = st.columns(4)
-            
-            with col1:
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
                 st.metric("Filtered Rows", f"{len(df_filtered_etl):,}")
-            with col2:
-                st.metric("Total Columns", len(df_filtered_etl.columns))
-            with col3:
-                if 'Ticker' in df_filtered_etl.columns:
+        with col2:
+            st.metric("Total Columns", len(df_filtered_etl.columns))
+        with col3:
+            if 'Ticker' in df_filtered_etl.columns:
                     st.metric("Tickers", len(df_filtered_etl['Ticker'].unique()))
-                else:
+            else:
                     st.metric("Tickers", "N/A")
-            with col4:
-                if 'Date' in df_filtered_etl.columns:
-                    date_min = df_filtered_etl['Date'].min()
-                    date_max = df_filtered_etl['Date'].max()
-                    st.metric("Date Range", f"{date_min.date() if hasattr(date_min, 'date') else date_min} to {date_max.date() if hasattr(date_max, 'date') else date_max}")
-                else:
-                    st.metric("Date Range", "N/A")
+        with col4:
+            if 'Date' in df_filtered_etl.columns:
+                date_min = df_filtered_etl['Date'].min()
+                date_max = df_filtered_etl['Date'].max()
+                st.metric("Date Range", f"{date_min.date() if hasattr(date_min, 'date') else date_min} to {date_max.date() if hasattr(date_max, 'date') else date_max}")
+            else:
+                st.metric("Date Range", "N/A")
         
         # Additional filtered data preview (if filters applied)
         if selected_ticker_etl or (date_range_etl and len(date_range_etl) == 2):
@@ -1836,6 +1898,165 @@ elif page == "🤖 Forecasting":
                     else:
                         safe_error("Silakan pilih ticker untuk forecast!")
         
+        # Premium Forecasting Visualizations (Bank of England Style)
+        if st.session_state.forecasts:
+            st.divider()
+            st.header("📊 Premium Forecasting Visualizations")
+            st.markdown("""
+            **Bank of England Standard**: Visualisasi forecasting kelas bank sentral dengan fokus pada risk assessment,
+            attribution analysis, dan market timing. Menggabungkan data teknikal dan fundamental.
+            """)
+            
+            ticker_viz = selected_ticker_forecast if selected_ticker_forecast else \
+                (df_filtered_forecast['Ticker'].iloc[0] if 'Ticker' in df_filtered_forecast.columns and len(df_filtered_forecast) > 0 else None)
+            
+            if ticker_viz and ticker_viz in st.session_state.forecasts:
+                forecast_data = st.session_state.forecasts[ticker_viz]
+                model_data = load_model(ticker_viz) if ticker_viz else None
+                
+                # 1. Fan Chart (Confidence Interval Bands)
+                st.subheader("1. Fan Chart: Confidence Interval Bands")
+                st.markdown("""
+                **Konsep**: Standar emas bank sentral untuk forecasting. Satu garis tengah dikelilingi pita dengan gradasi warna.
+                Area 50% yakin (gelap) dan 95% yakin (pudar). Fan melebar = volatilitas tinggi = kurangi posisi.
+                """)
+                try:
+                    fig_fan = plot_fan_chart(df_filtered_forecast, forecast_data, ticker=ticker_viz)
+                    if fig_fan is not None:
+                        st.plotly_chart(fig_fan, width='stretch', key=f'fan_{ticker_viz}')
+                    else:
+                        safe_warning("Tidak dapat membuat fan chart. Pastikan forecast memiliki yhat dan CI bands.")
+                except Exception as e:
+                    safe_error(f"Error membuat fan chart: {str(e)}")
+                    
+                # 2. Forecast Bridge (Waterfall Decomposition)
+                st.subheader("2. Forecast Bridge: Price Decomposition")
+                st.markdown("""
+                **Konsep**: Waterfall chart memecah harga prediksi menjadi kontribusi: Trend, Seasonality, Fundamental (ROE, Debt).
+                Batang hijau = faktor positif, batang merah = faktor negatif.
+                Attribution: "Harga naik $20 karena trend ($15) + ROE ($10) - Debt ($5)."
+                """)
+                try:
+                    if model_data:
+                        days_ahead = st.slider(
+                            "Pilih hari ke depan untuk breakdown:",
+                            min_value=1,
+                            max_value=min(90, len(forecast_data) if forecast_data is not None else 90),
+                            value=30,
+                            step=1,
+                            key=f'days_ahead_{ticker_viz}'
+                        )
+                        fig_bridge = plot_forecast_bridge(model_data, forecast_data, ticker=ticker_viz, days_ahead=days_ahead)
+                        if fig_bridge is not None:
+                            st.plotly_chart(fig_bridge, width='stretch', key=f'bridge_{ticker_viz}')
+                        else:
+                            safe_info("Forecast bridge tidak tersedia untuk data ini.")
+                    else:
+                        safe_warning("Model tidak tersedia untuk forecast bridge.")
+                except Exception as e:
+                    safe_error(f"Error membuat forecast bridge: {str(e)}")
+                    
+                # 3. Seasonal Heatmap Matrix
+                st.subheader("3. Seasonal Heatmap Matrix: Market Timing")
+                st.markdown("""
+                **Konsep**: Grid kalender untuk market timing. Sumbu X = Bulan (Jan-Des), Sumbu Y = Tahun.
+                Hijau pekat = Gain tinggi, Merah pekat = Loss dalam.
+                Deteksi pola: "Saham ini SELALU merah di bulan Mei selama 10 tahun terakhir" (Sell in May).
+                """)
+                try:
+                    fig_heatmap = plot_seasonal_heatmap_matrix(df_filtered_forecast, ticker=ticker_viz)
+                    if fig_heatmap is not None:
+                        st.plotly_chart(fig_heatmap, width='stretch', key=f'heatmap_matrix_{ticker_viz}')
+                    else:
+                        safe_warning("Tidak dapat membuat seasonal heatmap matrix. Pastikan data memiliki kolom Date dan Close.")
+                except Exception as e:
+                    safe_error(f"Error membuat seasonal heatmap matrix: {str(e)}")
+                    
+                # 4. Regime Change (Trend Changepoints)
+                st.subheader("4. Regime Change: Trend Changepoints")
+                st.markdown("""
+                **Konsep**: Deteksi perubahan struktur pasar dengan changepoints.
+                Garis vertikal putus-putus merah = structural breaks. Anotasi menunjukkan slope sebelum/sesudah.
+                Momentum Shift: "Trend naik mulai melemah sejak bulan lalu" = sinyal peringatan dini reversal.
+                """)
+                try:
+                    fig_regime = plot_regime_change(df_filtered_forecast, forecast_data, ticker=ticker_viz)
+                    if fig_regime is not None:
+                        st.plotly_chart(fig_regime, width='stretch', key=f'regime_{ticker_viz}')
+                    else:
+                        safe_warning("Tidak dapat membuat regime change chart. Pastikan data memiliki kolom Date dan Close.")
+                except Exception as e:
+                    safe_error(f"Error membuat regime change chart: {str(e)}")
+                
+                # 5. Scenario Simulator (Interactive Sensitivity)
+                st.subheader("5. Scenario Simulator: Interactive Sensitivity Analysis")
+                st.markdown("""
+                **Konsep**: Alat strategi untuk stress testing. Geser slider untuk mengubah variabel kunci,
+                lihat forecast berubah secara real-time. Menjawab: "Seberapa sensitif harga terhadap perubahan fundamental?"
+                """)
+                try:
+                    # Get base values
+                    base_debt = 0.72
+                    base_margin = 0.29
+                    base_ir = 0.03
+                    
+                    if df_filtered_forecast is not None and not df_filtered_forecast.empty:
+                        if 'Debt_Equity' in df_filtered_forecast.columns:
+                            base_debt = df_filtered_forecast['Debt_Equity'].iloc[-1] if pd.notna(df_filtered_forecast['Debt_Equity'].iloc[-1]) else 0.72
+                        elif 'Debt_Equity_Ratio' in df_filtered_forecast.columns:
+                            base_debt = df_filtered_forecast['Debt_Equity_Ratio'].iloc[-1] if pd.notna(df_filtered_forecast['Debt_Equity_Ratio'].iloc[-1]) else 0.72
+                        
+                        if 'EBIT_Margin' in df_filtered_forecast.columns:
+                            base_margin = df_filtered_forecast['EBIT_Margin'].iloc[-1] if pd.notna(df_filtered_forecast['EBIT_Margin'].iloc[-1]) else 0.29
+                    
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        debt_level = st.slider(
+                            "Debt/Equity Ratio",
+                            min_value=0.0,
+                            max_value=2.0,
+                            value=float(base_debt),
+                            step=0.05,
+                            help="Geser ke kanan (hutang naik) → forecast turun",
+                            key=f'debt_slider_{ticker_viz}'
+                        )
+                    with col2:
+                        profit_margin = st.slider(
+                            "Profit Margin (%)",
+                            min_value=0.0,
+                            max_value=50.0,
+                            value=float(base_margin * 100),
+                            step=0.5,
+                            help="Geser ke kanan (margin naik) → forecast naik",
+                            key=f'margin_slider_{ticker_viz}'
+                        ) / 100
+                    with col3:
+                        interest_rate = st.slider(
+                            "Interest Rate (%)",
+                            min_value=0.5,
+                            max_value=10.0,
+                            value=float(base_ir * 100),
+                            step=0.1,
+                            help="Geser ke kanan (IR naik) → forecast turun",
+                            key=f'ir_slider_scenario_{ticker_viz}'
+                        ) / 100
+                    
+                    fig_simulator = plot_scenario_simulator(
+                        df_filtered_forecast, forecast_data,
+                        debt_level=debt_level,
+                        profit_margin=profit_margin,
+                        interest_rate=interest_rate,
+                        ticker=ticker_viz
+                    )
+                    if fig_simulator is not None:
+                        st.plotly_chart(fig_simulator, width='stretch', key=f'simulator_{ticker_viz}')
+                    else:
+                        safe_info("Scenario simulator tidak tersedia untuk data ini.")
+                except Exception as e:
+                    safe_error(f"Error membuat scenario simulator: {str(e)}")
+        else:
+            safe_info("👆 Silakan generate forecast terlebih dahulu untuk melihat visualisasi!")
+        
         # 3D Immersive Visualizations
         if st.session_state.forecasts:
             st.divider()
@@ -1878,7 +2099,7 @@ elif page == "🤖 Forecasting":
                         safe_warning("Tidak dapat membuat neon time-tunnel. Pastikan forecast memiliki yhat dan CI bands.")
                 except Exception as e:
                     safe_error(f"Error membuat neon time-tunnel: {str(e)}")
-                
+        
                 # 2. Decomposition Glass Stack (3D Layers)
                 st.subheader("2. Decomposition Glass Stack: Isi Perut Harga")
                 st.markdown("""
@@ -1899,7 +2120,7 @@ elif page == "🤖 Forecasting":
                         safe_info("Decomposition glass stack tidak tersedia untuk data ini.")
                 except Exception as e:
                     safe_error(f"Error membuat decomposition glass stack: {str(e)}")
-                
+        
                 # 3. Seasonal Helix (3D Spiral)
                 st.subheader("3. Seasonal Helix: DNA of Market Cycles")
                 st.markdown("""
@@ -1934,7 +2155,7 @@ elif page == "🤖 Forecasting":
                         safe_warning("Data tidak memiliki kolom Date untuk seasonal helix.")
                 except Exception as e:
                     safe_error(f"Error membuat seasonal helix: {str(e)}")
-                
+        
                 # 4. Market Universe (3D Motion Bubble)
                 st.subheader("4. Market Universe: Risk-Reward-Health Space")
                 st.markdown("""
@@ -1969,7 +2190,7 @@ elif page == "🤖 Forecasting":
                         safe_info("Market universe memerlukan multiple tickers untuk perbandingan.")
                 except Exception as e:
                     safe_error(f"Error membuat market universe: {str(e)}")
-                
+        
                 # 5. What-If Terrain (3D Surface Simulation)
                 st.subheader("5. What-If Terrain: Economic Simulation")
                 st.markdown("""
@@ -2012,7 +2233,7 @@ elif page == "🤖 Forecasting":
                         safe_info("What-if terrain tidak tersedia untuk data ini.")
                 except Exception as e:
                     safe_error(f"Error membuat what-if terrain: {str(e)}")
-                
+        
                 # 6. Risk-Reward Motion Quadrant (KEPT - as requested)
                 st.subheader("6. Risk-Reward Motion Quadrant: Stock Journey")
                 st.markdown("""
@@ -2031,6 +2252,236 @@ elif page == "🤖 Forecasting":
                     safe_error(f"Error membuat risk-reward motion quadrant: {str(e)}")
             else:
                 safe_info("👆 Silakan generate forecast terlebih dahulu untuk melihat visualisasi!")
+        else:
+            safe_info("👆 Silakan generate forecast terlebih dahulu untuk melihat visualisasi!")
+
+elif page == "📈 Model Evaluation":
+    st.header("📈 Model Evaluation & Analysis")
+    st.markdown("""
+    Halaman ini menyediakan analisis komprehensif dan evaluasi mendalam terhadap model forecasting.
+    Termasuk residual analysis, diagnostic tests, dan rekomendasi perbaikan model.
+    """)
+    
+    if (st.session_state.df_processed is not None and 
+        hasattr(st.session_state.df_processed, 'columns') and 
+        not st.session_state.df_processed.empty):
+        
+        # Check if models are trained
+        if not st.session_state.trained_models:
+            safe_warning("⚠️ Silakan train models terlebih dahulu di halaman Forecasting untuk melakukan evaluasi.")
+            safe_info("👈 Kembali ke halaman Forecasting dan klik tombol '🚀 Train Models'.")
+        else:
+            # Select ticker for evaluation
+            with st.expander("🔍 Select Model for Evaluation", expanded=True):
+                if 'Ticker' in st.session_state.df_processed.columns:
+                    tickers = sorted([t for t in st.session_state.trained_models.keys() 
+                                    if st.session_state.trained_models[t].get('success', False)])
+                    if tickers:
+                        selected_ticker_eval = st.selectbox(
+                            "Pilih Ticker untuk Evaluasi",
+                            tickers,
+                            help="Pilih ticker yang sudah di-train untuk melihat evaluasi detail",
+                            key="eval_ticker"
+                        )
+                    else:
+                        selected_ticker_eval = None
+                        safe_warning("Tidak ada model yang berhasil di-train.")
+                else:
+                    selected_ticker_eval = 'ALL' if 'ALL' in st.session_state.trained_models else None
+            
+            if selected_ticker_eval and selected_ticker_eval in st.session_state.trained_models:
+                model_result = st.session_state.trained_models[selected_ticker_eval]
+                
+                if model_result.get('success', False):
+                    try:
+                        # Prepare data for evaluation
+                        from modeling import prepare_prophet_data
+                        prophet_df = prepare_prophet_data(
+                            st.session_state.df_processed, 
+                            ticker=selected_ticker_eval if selected_ticker_eval != 'ALL' else None
+                        )
+                        
+                        # Get split date
+                        split_date = pd.Timestamp(st.session_state.split_date_str)
+                        
+                        # Split data
+                        train_df = prophet_df[prophet_df['ds'] < split_date].copy()
+                        test_df = prophet_df[prophet_df['ds'] >= split_date].copy()
+                        
+                        if len(train_df) > 0 and len(test_df) > 0:
+                            # Load model
+                            model = load_model(selected_ticker_eval)
+                            
+                            if model:
+                                # Perform comprehensive evaluation
+                                with st.spinner("Menghitung evaluasi model..."):
+                                    eval_results = evaluate_model_performance(
+                                        model=model,
+                                        train_df=train_df,
+                                        test_df=test_df
+                                    )
+                                
+                                # Display metrics
+                                st.markdown("---")
+                                st.subheader("📊 Model Performance Metrics")
+                                
+                                metrics = eval_results['metrics']
+                                col1, col2, col3, col4 = st.columns(4)
+                                
+                                with col1:
+                                    st.metric("RMSE", f"{metrics['RMSE']:.4f}")
+                                    st.caption("Root Mean Squared Error")
+                                
+                                with col2:
+                                    st.metric("MAE", f"{metrics['MAE']:.4f}")
+                                    st.caption("Mean Absolute Error")
+                                
+                                with col3:
+                                    st.metric("MAPE", f"{metrics['MAPE']:.2f}%")
+                                    st.caption("Mean Absolute Percentage Error")
+                                
+                                with col4:
+                                    st.metric("R²", f"{metrics['R2']:.4f}")
+                                    st.caption("Coefficient of Determination")
+                                
+                                # Advanced metrics
+                                st.markdown("#### Advanced Metrics")
+                                col1, col2, col3, col4 = st.columns(4)
+                                
+                                with col1:
+                                    mase = metrics['MASE']
+                                    st.metric("MASE", f"{mase:.4f}")
+                                    if mase < 1:
+                                        st.success("✅ Better than naive")
+                                    elif mase == 1:
+                                        st.info("⚖️ Equal to naive")
+                                    else:
+                                        st.error("❌ Worse than naive")
+                                    st.caption("Mean Absolute Scaled Error")
+                                
+                                with col2:
+                                    da = metrics['Directional_Accuracy']
+                                    st.metric("Directional Accuracy", f"{da:.2f}%")
+                                    if da > 60:
+                                        st.success("✅ Good")
+                                    elif da > 50:
+                                        st.info("⚖️ Acceptable")
+                                    else:
+                                        st.error("❌ Poor")
+                                    st.caption("Direction Prediction Accuracy")
+                                
+                                with col3:
+                                    st.metric("Theil's U", f"{metrics['Theil_U']:.4f}")
+                                    st.caption("Normalized RMSE")
+                                
+                                with col4:
+                                    st.metric("Mean Error", f"{metrics['Mean_Error']:.4f}")
+                                    st.caption("Bias (ideal: 0)")
+                                
+                                # Residual Analysis
+                                st.markdown("---")
+                                st.subheader("🔍 Residual Analysis")
+                                
+                                residuals_info = eval_results['residuals']
+                                col1, col2, col3, col4 = st.columns(4)
+                                
+                                with col1:
+                                    st.metric("Mean", f"{residuals_info['mean']:.4f}")
+                                    st.caption("Ideal: 0")
+                                
+                                with col2:
+                                    st.metric("Std Dev", f"{residuals_info['std']:.4f}")
+                                
+                                with col3:
+                                    st.metric("Min", f"{residuals_info['min']:.4f}")
+                                
+                                with col4:
+                                    st.metric("Max", f"{residuals_info['max']:.4f}")
+                                
+                                # Diagnostic Tests
+                                st.markdown("#### Diagnostic Tests")
+                                diagnostics = eval_results['diagnostics']
+                                
+                                col1, col2 = st.columns(2)
+                                with col1:
+                                    st.markdown("**Normality Test (Jarque-Bera):**")
+                                    if diagnostics['is_normal']:
+                                        st.success(f"✅ Residuals are normally distributed (p-value: {diagnostics['jb_pvalue']:.4f})")
+                                    else:
+                                        st.warning(f"⚠️ Residuals are NOT normally distributed (p-value: {diagnostics['jb_pvalue']:.4f})")
+                                
+                                with col2:
+                                    st.markdown("**Autocorrelation Test (Ljung-Box):**")
+                                    if diagnostics['has_autocorrelation']:
+                                        st.warning(f"⚠️ Residuals have autocorrelation (p-value: {diagnostics['lb_pvalue']:.4f})")
+                                    else:
+                                        st.success(f"✅ No significant autocorrelation (p-value: {diagnostics['lb_pvalue']:.4f})")
+                                
+                                # Visualizations
+                                st.markdown("---")
+                                st.subheader("📈 Visualization")
+                                
+                                # Residual Analysis Plot
+                                try:
+                                    forecast_df = eval_results.get('forecast_df')
+                                    if forecast_df is not None:
+                                        y_true = test_df['y'].values
+                                        y_pred = forecast_df['yhat'].values[:len(y_true)]
+                                        
+                                        fig_residual = plot_residual_analysis(
+                                            y_true, 
+                                            y_pred,
+                                            title=f"Residual Analysis - {selected_ticker_eval}"
+                                        )
+                                        st.plotly_chart(fig_residual, use_container_width=True)
+                                except Exception as e:
+                                    safe_warning(f"Tidak dapat membuat residual analysis plot: {str(e)}")
+                                
+                                # Forecast Accuracy by Horizon
+                                try:
+                                    fig_horizon = plot_forecast_accuracy_by_horizon(
+                                        eval_results,
+                                        title=f"Forecast Accuracy by Horizon - {selected_ticker_eval}"
+                                    )
+                                    st.plotly_chart(fig_horizon, use_container_width=True)
+                                except Exception as e:
+                                    safe_warning(f"Tidak dapat membuat horizon analysis plot: {str(e)}")
+                                
+                                # Evaluation Report
+                                st.markdown("---")
+                                st.subheader("📄 Evaluation Report")
+                                
+                                report = generate_model_evaluation_report(
+                                    eval_results,
+                                    ticker=selected_ticker_eval
+                                )
+                                
+                                with st.expander("📋 View Full Report", expanded=False):
+                                    st.markdown(report)
+                                
+                                # Download report
+                                st.download_button(
+                                    label="📥 Download Report (TXT)",
+                                    data=report,
+                                    file_name=f"model_evaluation_{selected_ticker_eval}.txt",
+                                    mime="text/plain"
+                                )
+                                
+                            else:
+                                safe_error(f"Model untuk {selected_ticker_eval} tidak ditemukan.")
+                        else:
+                            safe_warning("Data train/test tidak mencukupi untuk evaluasi.")
+                    except Exception as e:
+                        safe_error(f"Error saat evaluasi model: {str(e)}")
+                        import traceback
+                        st.code(traceback.format_exc())
+                else:
+                    safe_error(f"Model untuk {selected_ticker_eval} gagal di-train: {model_result.get('error', 'Unknown error')}")
+            else:
+                safe_info("👆 Silakan pilih ticker untuk evaluasi.")
+    else:
+        safe_warning("⚠️ Upload dan proses file terlebih dahulu untuk mengakses halaman ini.")
+        safe_info("👈 Silakan upload file CSV di halaman ETL Results untuk memulai analisis.")
 
 else:
     # Welcome screen

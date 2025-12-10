@@ -51,19 +51,65 @@ def load_csv_chunked(file_path: str = None, file_content: bytes = None, chunk_si
         
         # Try parsing Date column, jika gagal akan di-handle
         try:
-            for chunk in pd.read_csv(source, chunksize=chunk_size, parse_dates=['Date']):
-                chunks.append(chunk)
-        except (KeyError, ValueError):
-            # Jika Date tidak ada atau tidak bisa di-parse, baca tanpa parse_dates
-            if file_content is not None:
-                file_obj = io.BytesIO(file_content)
-                source = file_obj
-            for chunk in pd.read_csv(source, chunksize=chunk_size):
-                if 'Date' in chunk.columns:
-                    chunk['Date'] = pd.to_datetime(chunk['Date'], errors='coerce')
-                chunks.append(chunk)
+            # Try with UTF-8 first
+            try:
+                for chunk in pd.read_csv(
+                    source, 
+                    chunksize=chunk_size, 
+                    parse_dates=['Date'],
+                    low_memory=True,
+                    encoding='utf-8',
+                    on_bad_lines='skip',
+                    engine='python'
+                ):
+                    chunks.append(chunk)
+            except (KeyError, ValueError, UnicodeDecodeError, pd.errors.ParserError):
+                # If Date column doesn't exist or can't parse, try without parse_dates
+                if file_content is not None:
+                    file_obj = io.BytesIO(file_content)
+                    source = file_obj
+                else:
+                    source = str(file_path)
+                
+                # Try with different encoding
+                try:
+                    for chunk in pd.read_csv(
+                        source, 
+                        chunksize=chunk_size,
+                        low_memory=True,
+                        encoding='utf-8',
+                        on_bad_lines='skip',
+                        engine='python',
+                        sep=None  # Auto-detect separator
+                    ):
+                        if 'Date' in chunk.columns:
+                            chunk['Date'] = pd.to_datetime(chunk['Date'], errors='coerce')
+                        chunks.append(chunk)
+                except (UnicodeDecodeError, pd.errors.ParserError):
+                    # Try with latin-1 encoding
+                    if file_content is not None:
+                        file_obj = io.BytesIO(file_content)
+                        source = file_obj
+                    else:
+                        source = str(file_path)
+                    
+                    for chunk in pd.read_csv(
+                        source, 
+                        chunksize=chunk_size,
+                        low_memory=True,
+                        encoding='latin-1',
+                        on_bad_lines='skip',
+                        engine='python',
+                        sep=None
+                    ):
+                        if 'Date' in chunk.columns:
+                            chunk['Date'] = pd.to_datetime(chunk['Date'], errors='coerce')
+                        chunks.append(chunk)
         except Exception as e:
-            st.error(f"Error membaca CSV: {str(e)}")
+            error_msg = str(e)
+            st.error(f"Error membaca CSV: {error_msg}")
+            if "400" in error_msg or "Bad Request" in error_msg:
+                st.info("💡 Error 400: Coba gunakan file yang lebih kecil atau aktifkan downsampling.")
             return pd.DataFrame()
         
         if not chunks:

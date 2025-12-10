@@ -94,8 +94,8 @@ def plot_neon_cyber_forecast(df: pd.DataFrame, forecast: pd.DataFrame = None,
         fig.add_trace(go.Scatter(
             x=dates_future,
             y=yhat,
-            mode='lines',
-            name='Forecast',
+                                mode='lines',
+                                name='Forecast',
             line=dict(color='#00ffff', width=3),
             hovertemplate='<b>Forecast</b><br>Date: %{x}<br>Price: $%{y:.2f}<extra></extra>'
         ))
@@ -236,7 +236,7 @@ def plot_neon_time_tunnel(df: pd.DataFrame, forecast: pd.DataFrame = None,
                 x=dates_numeric,
                 y=yhat_lower,
                 z=np.zeros(len(dates_numeric)) - 0.5,
-                mode='lines',
+                        mode='lines',
                 name='Uncertainty Wall (Lower)',
                 line=dict(color='rgba(255, 0, 0, 0.3)', width=3),
                 surfaceaxis=1,
@@ -248,7 +248,7 @@ def plot_neon_time_tunnel(df: pd.DataFrame, forecast: pd.DataFrame = None,
                 x=dates_numeric,
                 y=yhat_upper,
                 z=np.zeros(len(dates_numeric)) + 0.5,
-                mode='lines',
+                        mode='lines',
                 name='Uncertainty Wall (Upper)',
                 line=dict(color='rgba(0, 255, 0, 0.3)', width=3),
                 surfaceaxis=1,
@@ -561,7 +561,7 @@ def plot_seasonal_helix(df: pd.DataFrame, forecast: pd.DataFrame = None,
                 
                 hover_texts.append(f"{year}-{month:02d}<br>Return: {ret:.2%}")
         
-        fig = go.Figure()
+                fig = go.Figure()
         
         # Create spiral line
         fig.add_trace(go.Scatter3d(
@@ -638,7 +638,7 @@ def plot_market_universe(df: pd.DataFrame, forecast: pd.DataFrame = None,
     try:
         if df is None or df.empty:
             return None
-        
+    
         df = df.copy()
         
         # Need multiple tickers for this visualization
@@ -875,13 +875,284 @@ def plot_what_if_terrain(df: pd.DataFrame, forecast: pd.DataFrame = None,
     except Exception as e:
         print(f"Error in plot_what_if_terrain: {str(e)}")
         return None
+        
+
+# ========== NEW FORECASTING VISUALIZATIONS ==========
+
+def plot_fan_chart(df: pd.DataFrame, forecast: pd.DataFrame = None, ticker: str = None):
+    """
+    Fan Chart: Confidence Interval Bands (Bank of England style).
+    
+    Standar emas bank sentral untuk forecasting. Satu garis tengah dikelilingi
+    pita dengan gradasi warna berbeda (50% yakin gelap, 95% yakin pudar).
+    
+    Parameters:
+    -----------
+    df : pd.DataFrame
+        Historical data
+    forecast : pd.DataFrame
+        Prophet forecast dengan kolom ds, yhat, yhat_lower, yhat_upper
+    ticker : str
+        Ticker symbol
+    
+    Returns:
+    --------
+    go.Figure : Plotly figure dengan fan chart
+    """
+    try:
+        if forecast is None or forecast.empty:
+            return None
+        
+        forecast = forecast.copy()
+        forecast['ds'] = pd.to_datetime(forecast['ds'])
+        
+        if 'yhat' not in forecast.columns:
+            return None
+        
+        # Separate historical and future
+        if 'y' in forecast.columns:
+            forecast_future = forecast[forecast['y'].isna()].copy()
+            forecast_hist = forecast[forecast['y'].notna()].copy()
+        else:
+            forecast_future = forecast.tail(90).copy()
+            forecast_hist = forecast.head(len(forecast) - 90).copy()
+        
+        if forecast_future.empty:
+            return None
+        
+        dates_future = forecast_future['ds']
+        yhat = forecast_future['yhat'].values
+        
+        # Get confidence intervals
+        if 'yhat_upper' in forecast_future.columns and 'yhat_lower' in forecast_future.columns:
+            yhat_upper_95 = forecast_future['yhat_upper'].values
+            yhat_lower_95 = forecast_future['yhat_lower'].values
+        else:
+            # Estimate from yhat
+            std_dev = np.std(yhat) * 1.96
+            yhat_upper_95 = yhat + std_dev
+            yhat_lower_95 = yhat - std_dev
+        
+        # Calculate 50% confidence interval (approximately 0.67 std dev)
+        std_dev_50 = np.std(yhat) * 0.67
+        yhat_upper_50 = yhat + std_dev_50
+        yhat_lower_50 = yhat - std_dev_50
+        
+        fig = go.Figure()
+        
+        # Historical data
+        if not forecast_hist.empty and 'y' in forecast_hist.columns:
+            fig.add_trace(go.Scatter(
+                x=forecast_hist['ds'],
+                y=forecast_hist['y'],
+                mode='lines+markers',
+                name='Historical Price',
+                line=dict(color='rgba(100, 100, 100, 0.5)', width=2),
+                marker=dict(size=3, color='gray')
+            ))
+        
+        # 95% confidence band (outer, lighter)
+        fig.add_trace(go.Scatter(
+            x=list(dates_future) + list(dates_future[::-1]),
+            y=list(yhat_upper_95) + list(yhat_lower_95[::-1]),
+                    fill='toself',
+            fillcolor='rgba(255, 0, 0, 0.1)',
+            line=dict(color='rgba(255, 0, 0, 0.3)', width=0),
+            name='95% Confidence',
+            hoverinfo='skip'
+        ))
+        
+        # 50% confidence band (inner, darker)
+        fig.add_trace(go.Scatter(
+            x=list(dates_future) + list(dates_future[::-1]),
+            y=list(yhat_upper_50) + list(yhat_lower_50[::-1]),
+            fill='toself',
+            fillcolor='rgba(255, 0, 0, 0.3)',
+            line=dict(color='rgba(255, 0, 0, 0.5)', width=0),
+            name='50% Confidence',
+            hoverinfo='skip'
+        ))
+        
+        # Main forecast line
+        fig.add_trace(go.Scatter(
+            x=dates_future,
+            y=yhat,
+            mode='lines',
+            name='Forecast',
+            line=dict(color='#1f77b4', width=3),
+            hovertemplate='<b>Forecast</b><br>Date: %{x}<br>Price: $%{y:.2f}<extra></extra>'
+        ))
+        
+        # Calculate fan width (uncertainty expansion)
+        fan_width_95 = (yhat_upper_95 - yhat_lower_95) / yhat
+        fan_width_50 = (yhat_upper_50 - yhat_lower_50) / yhat
+        
+        ticker_name = ticker if ticker else "Data"
+        fig.update_layout(
+            title=dict(
+                text=f"Fan Chart: Confidence Interval Bands ({ticker_name})<br><sub>Fan Width (95%): {fan_width_95[-1]*100:.1f}% | Risk Assessment: {'High' if fan_width_95[-1] > 0.2 else 'Moderate' if fan_width_95[-1] > 0.1 else 'Low'}</sub>",
+                font=dict(size=18, family='Arial Black')
+            ),
+            xaxis_title="Date",
+            yaxis_title="Price (USD)",
+            height=600,
+            hovermode='x unified',
+            plot_bgcolor='white',
+            paper_bgcolor='white',
+            legend=dict(
+                yanchor="top",
+                y=0.99,
+                xanchor="left",
+                x=0.01
+            )
+        )
+        
+        return fig
+        
+    except Exception as e:
+        print(f"Error in plot_fan_chart: {str(e)}")
+        return None
 
 
-# Stub functions untuk backward compatibility (akan diimplementasikan jika diperlukan)
 def plot_forecast_bridge(model_data: dict = None, forecast: pd.DataFrame = None,
                          ticker: str = None, days_ahead: int = 30):
-    """Forecast Bridge: Waterfall decomposition - redirect to glass stack"""
-    return plot_decomposition_glass_stack(model_data, forecast, ticker, explode_layers=False)
+    """
+    Forecast Bridge: Waterfall Decomposition.
+    
+    Memecah harga prediksi menjadi kontribusi: Trend, Seasonality, Fundamental (ROE, Debt).
+    Batang hijau = faktor positif, batang merah = faktor negatif.
+    
+    Parameters:
+    -----------
+    model_data : dict
+        Prophet model data dengan komponen
+    forecast : pd.DataFrame
+        Prophet forecast
+    ticker : str
+        Ticker symbol
+    days_ahead : int
+        Hari ke depan untuk breakdown
+    
+    Returns:
+    --------
+    go.Figure : Waterfall chart
+    """
+    try:
+        if forecast is None or forecast.empty:
+            return None
+        
+        forecast = forecast.copy()
+        forecast['ds'] = pd.to_datetime(forecast['ds'])
+        
+        if 'yhat' not in forecast.columns:
+            return None
+        
+        # Get forecast for specific day
+        if len(forecast) < days_ahead:
+            days_ahead = len(forecast) - 1
+        
+        forecast_future = forecast[forecast['y'].isna()].copy() if 'y' in forecast.columns else forecast.tail(90).copy()
+        if len(forecast_future) < days_ahead:
+            days_ahead = len(forecast_future) - 1
+        
+        target_forecast = forecast_future.iloc[days_ahead]
+        target_date = target_forecast['ds']
+        target_price = target_forecast['yhat']
+        
+        # Get historical last price
+        forecast_hist = forecast[forecast['y'].notna()].copy() if 'y' in forecast.columns else forecast.head(len(forecast) - 90).copy()
+        if forecast_hist.empty:
+            base_price = target_price * 0.9  # Estimate
+        else:
+            base_price = forecast_hist['y'].iloc[-1] if 'y' in forecast_hist.columns else forecast_hist['yhat'].iloc[-1]
+        
+        # Decompose contributions
+        contributions = []
+        
+        # Trend contribution
+        if 'trend' in forecast.columns:
+            trend_start = forecast_hist['trend'].iloc[-1] if not forecast_hist.empty and 'trend' in forecast_hist.columns else base_price * 0.7
+            trend_end = target_forecast['trend'] if 'trend' in target_forecast else base_price * 0.7
+            trend_contrib = trend_end - trend_start
+            contributions.append(('Base Trend', trend_contrib, '#3498db'))
+        else:
+            trend_contrib = (target_price - base_price) * 0.5
+            contributions.append(('Base Trend', trend_contrib, '#3498db'))
+        
+        # Seasonality contribution
+        if 'seasonal' in forecast.columns:
+            seasonal_contrib = target_forecast['seasonal'] if 'seasonal' in target_forecast else 0
+            contributions.append(('Seasonality', seasonal_contrib, '#2ecc71' if seasonal_contrib >= 0 else '#e74c3c'))
+        else:
+            contributions.append(('Seasonality', 0, '#95a5a6'))
+        
+        # Regressor contributions (if available)
+        regressor_cols = ['ROE', 'Debt_Equity', 'EBIT_Margin']
+        for col in regressor_cols:
+            if col in forecast.columns:
+                regressor_value = target_forecast[col] if col in target_forecast else 0
+                # Simple impact model
+                if col == 'ROE':
+                    impact = regressor_value * 0.1  # Positive impact
+                elif col == 'Debt_Equity':
+                    impact = -regressor_value * 0.05  # Negative impact
+                elif col == 'EBIT_Margin':
+                    impact = regressor_value * 0.15  # Positive impact
+                else:
+                    impact = 0
+                
+                contributions.append((col, impact, '#2ecc71' if impact >= 0 else '#e74c3c'))
+        
+        # Calculate waterfall values
+        waterfall_values = [base_price]
+        waterfall_labels = ['Today']
+        waterfall_colors = ['#95a5a6']
+        
+        current_value = base_price
+        for label, contrib, color in contributions:
+            current_value += contrib
+            waterfall_values.append(current_value)
+            waterfall_labels.append(label)
+            waterfall_colors.append(color)
+        
+        # Final price
+        waterfall_values.append(target_price)
+        waterfall_labels.append('Forecast')
+        waterfall_colors.append('#1f77b4')
+        
+        # Create waterfall chart
+        fig = go.Figure(go.Waterfall(
+            orientation="v",
+            measure=["absolute"] + ["relative"] * (len(contributions)) + ["total"],
+            x=waterfall_labels,
+            textposition="outside",
+            text=[f"${v:.2f}" for v in waterfall_values],
+            y=[waterfall_values[0]] + [waterfall_values[i+1] - waterfall_values[i] for i in range(len(waterfall_values)-1)],
+            connector={"line": {"color": "rgb(63, 63, 63)"}},
+            increasing={"marker": {"color": "#2ecc71"}},
+            decreasing={"marker": {"color": "#e74c3c"}},
+            totals={"marker": {"color": "#1f77b4"}}
+        ))
+        
+        ticker_name = ticker if ticker else "Data"
+        fig.update_layout(
+            title=dict(
+                text=f"Forecast Bridge: Price Decomposition ({ticker_name})<br><sub>Breakdown for {target_date.strftime('%Y-%m-%d')} ({days_ahead} days ahead)</sub>",
+                font=dict(size=18, family='Arial Black')
+            ),
+            xaxis_title="Components",
+                yaxis_title="Price (USD)",
+            height=600,
+            showlegend=False,
+            plot_bgcolor='white',
+            paper_bgcolor='white'
+        )
+        
+        return fig
+        
+    except Exception as e:
+        print(f"Error in plot_forecast_bridge: {str(e)}")
+        return None
 
 def plot_seasonal_compass(model_data: dict = None, forecast: pd.DataFrame = None, ticker: str = None):
     """Seasonal Compass: Radar chart - redirect to helix"""
@@ -969,8 +1240,362 @@ def plot_scenario_simulator(*args, **kwargs):
     """Scenario Simulator - using what-if terrain"""
     return plot_what_if_terrain(*args, **kwargs)
 
-def plot_seasonal_heatmap_calendar(*args, **kwargs):
-    return None
+def plot_seasonal_heatmap_matrix(df: pd.DataFrame, ticker: str = None):
+    """
+    Seasonal Heatmap Matrix: Grid kalender untuk Market Timing.
+    
+    Grid kotak-kotak: Sumbu X = Bulan (Jan-Des), Sumbu Y = Tahun.
+    Hijau pekat = Gain tinggi, Merah pekat = Loss dalam.
+    
+    Parameters:
+    -----------
+    df : pd.DataFrame
+        Historical data dengan kolom Date, Close
+    ticker : str
+        Ticker symbol
+    
+    Returns:
+    --------
+    go.Figure : Heatmap matrix
+    """
+    try:
+        if df is None or df.empty or 'Date' not in df.columns or 'Close' not in df.columns:
+            return None
+        
+        df = df.copy()
+        df['Date'] = pd.to_datetime(df['Date'])
+        df = df.sort_values('Date')
+        
+        # Calculate monthly returns
+        df['Year'] = df['Date'].dt.year
+        df['Month'] = df['Date'].dt.month
+        
+        # Get last price per month
+        monthly_data = df.groupby(['Year', 'Month'])['Close'].last().reset_index()
+        monthly_data['Return'] = monthly_data.groupby('Year')['Close'].pct_change().fillna(0) * 100
+        
+        # Create pivot table
+        heatmap_data = monthly_data.pivot(index='Year', columns='Month', values='Return')
+        heatmap_data = heatmap_data.sort_index(ascending=False)  # Latest year on top
+        
+        # Create heatmap
+        fig = go.Figure(data=go.Heatmap(
+            z=heatmap_data.values,
+            x=['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'],
+            y=heatmap_data.index.astype(str),
+            colorscale='RdYlGn',
+            zmid=0,
+            text=heatmap_data.round(1).values,
+            texttemplate='%{text}%',
+            textfont={"size": 9},
+            colorbar=dict(title="Return %")
+            ))
+        
+        ticker_name = ticker if ticker else "Data"
+        fig.update_layout(
+            title=dict(
+                text=f"Seasonal Heatmap Matrix: Market Timing ({ticker_name})<br><sub>Green = Gain, Red = Loss. Look for consistent patterns across years.</sub>",
+                font=dict(size=18, family='Arial Black')
+            ),
+            xaxis_title="Month",
+            yaxis_title="Year",
+            height=600,
+            plot_bgcolor='white',
+            paper_bgcolor='white'
+        )
+        
+        return fig
+        
+    except Exception as e:
+        print(f"Error in plot_seasonal_heatmap_matrix: {str(e)}")
+        return None
+
+
+def plot_seasonal_heatmap_calendar(df: pd.DataFrame, ticker: str = None):
+    """Alias for seasonal heatmap matrix"""
+    return plot_seasonal_heatmap_matrix(df, ticker)
+
+
+def plot_regime_change(df: pd.DataFrame, forecast: pd.DataFrame = None, 
+                       ticker: str = None, changepoints: list = None):
+    """
+    Regime Change: Trend Changepoints Detection.
+    
+    Menyoroti perubahan struktur pasar dengan changepoints.
+    Garis berubah warna atau memiliki garis vertikal putus-putus di changepoints.
+    
+    Parameters:
+    -----------
+    df : pd.DataFrame
+        Historical data
+    forecast : pd.DataFrame
+        Prophet forecast
+    ticker : str
+        Ticker symbol
+    changepoints : list
+        List of changepoint dates (if None, will detect from forecast)
+    
+    Returns:
+    --------
+    go.Figure : Line chart dengan changepoints
+    """
+    try:
+        if df is None or df.empty or 'Date' not in df.columns or 'Close' not in df.columns:
+            return None
+        
+        df = df.copy()
+        df['Date'] = pd.to_datetime(df['Date'])
+        df = df.sort_values('Date')
+        
+        fig = go.Figure()
+        
+        # Plot historical price
+        fig.add_trace(go.Scatter(
+            x=df['Date'],
+            y=df['Close'],
+            mode='lines',
+            name='Historical Price',
+            line=dict(color='rgba(100, 100, 100, 0.7)', width=2)
+        ))
+        
+        # Detect changepoints from trend changes
+        if changepoints is None and forecast is not None and not forecast.empty:
+            forecast = forecast.copy()
+            forecast['ds'] = pd.to_datetime(forecast['ds'])
+            
+            if 'trend' in forecast.columns:
+                # Calculate trend slope changes
+                forecast['trend_slope'] = forecast['trend'].diff()
+                forecast['trend_change'] = forecast['trend_slope'].diff()
+                
+                # Find significant changepoints (slope change > threshold)
+                threshold = forecast['trend_change'].std() * 2
+                changepoints = forecast[abs(forecast['trend_change']) > threshold]['ds'].tolist()
+        
+        # Add changepoint markers
+        if changepoints:
+            for cp_date in changepoints:
+                if isinstance(cp_date, str):
+                    cp_date = pd.to_datetime(cp_date)
+                elif not isinstance(cp_date, pd.Timestamp):
+                    cp_date = pd.to_datetime(cp_date)
+                
+                # Ensure cp_date is a Timestamp for proper comparison
+                if not isinstance(cp_date, pd.Timestamp):
+                    cp_date = pd.Timestamp(cp_date)
+                
+                # Find price at changepoint - ensure Date column is datetime
+                df_date_col = pd.to_datetime(df['Date'])
+                mask = df_date_col <= cp_date
+                cp_price = df[mask]['Close'].iloc[-1] if mask.sum() > 0 else df['Close'].iloc[-1]
+                
+                # Add vertical line
+                fig.add_vline(
+                    x=cp_date,
+                    line_dash="dash",
+                    line_color="red",
+                    opacity=0.5,
+                    annotation_text="Regime Change"
+                )
+                
+                # Add annotation with slope
+                if forecast is not None and not forecast.empty and 'trend' in forecast.columns:
+                    forecast_ds = pd.to_datetime(forecast['ds'])
+                    cp_forecast = forecast[forecast_ds <= cp_date]
+                    if len(cp_forecast) > 1:
+                        slope_before = (cp_forecast['trend'].iloc[-1] - cp_forecast['trend'].iloc[-2]) / cp_forecast['trend'].iloc[-2] * 100
+                        fig.add_annotation(
+                            x=cp_date,
+                            y=cp_price,
+                            text=f"Slope: {slope_before:.2f}%/day",
+                            showarrow=True,
+                            arrowhead=2,
+                            bgcolor='rgba(255, 0, 0, 0.8)',
+                            bordercolor='white',
+                            font=dict(color='white', size=10)
+                        )
+        
+        # Add forecast if available
+        if forecast is not None and not forecast.empty:
+            forecast = forecast.copy()
+            forecast['ds'] = pd.to_datetime(forecast['ds'])
+            
+            if 'y' in forecast.columns:
+                forecast_future = forecast[forecast['y'].isna()].copy()
+            else:
+                forecast_future = forecast.tail(90).copy()
+            
+            if not forecast_future.empty and 'yhat' in forecast_future.columns:
+                fig.add_trace(go.Scatter(
+                    x=forecast_future['ds'],
+                    y=forecast_future['yhat'],
+                    mode='lines',
+                    name='Forecast',
+                    line=dict(color='#1f77b4', width=3, dash='dot')
+                ))
+        
+        ticker_name = ticker if ticker else "Data"
+        fig.update_layout(
+            title=dict(
+                text=f"Regime Change: Trend Changepoints ({ticker_name})<br><sub>Red dashed lines = Structural breaks. Watch for momentum shifts.</sub>",
+                font=dict(size=18, family='Arial Black')
+            ),
+            xaxis_title="Date",
+                yaxis_title="Price (USD)",
+            height=600,
+            hovermode='x unified',
+            plot_bgcolor='white',
+            paper_bgcolor='white'
+        )
+        
+        return fig
+        
+    except Exception as e:
+        print(f"Error in plot_regime_change: {str(e)}")
+        return None
+
+
+def plot_scenario_simulator(df: pd.DataFrame, forecast: pd.DataFrame = None,
+                           debt_level: float = None, profit_margin: float = None,
+                           interest_rate: float = None, ticker: str = None):
+    """
+    Scenario Simulator: Interactive Sensitivity Analysis.
+    
+    Grafik forecast dengan sliders untuk variabel kunci: Interest Rate, Debt Level, Profit Margin.
+    Stress testing untuk melihat sensitivitas harga terhadap perubahan fundamental.
+    
+    Parameters:
+    -----------
+    df : pd.DataFrame
+        Historical data
+    forecast : pd.DataFrame
+        Base Prophet forecast
+    debt_level : float
+        Debt/Equity ratio untuk scenario
+    profit_margin : float
+        Profit margin untuk scenario
+    interest_rate : float
+        Interest rate untuk scenario
+    ticker : str
+        Ticker symbol
+    
+    Returns:
+    --------
+    go.Figure : Interactive forecast dengan scenario adjustments
+    """
+    try:
+        if forecast is None or forecast.empty:
+            return None
+        
+        forecast = forecast.copy()
+        forecast['ds'] = pd.to_datetime(forecast['ds'])
+        
+        if 'yhat' not in forecast.columns:
+            return None
+        
+        # Separate historical and future
+        if 'y' in forecast.columns:
+            forecast_future = forecast[forecast['y'].isna()].copy()
+            forecast_hist = forecast[forecast['y'].notna()].copy()
+        else:
+            forecast_future = forecast.tail(90).copy()
+            forecast_hist = forecast.head(len(forecast) - 90).copy()
+        
+        if forecast_future.empty:
+            return None
+        
+        dates_future = forecast_future['ds']
+        base_yhat = forecast_future['yhat'].values
+        
+        # Get base values
+        base_debt = debt_level if debt_level is not None else 0.72
+        base_margin = profit_margin if profit_margin is not None else 0.29
+        base_ir = interest_rate if interest_rate is not None else 0.03
+        
+        # Calculate scenario adjustments
+        # Debt impact: higher debt = lower price
+        debt_impact = (base_debt - 0.5) * -0.1
+        
+        # Margin impact: higher margin = higher price
+        margin_impact = (base_margin - 0.2) * 0.15
+        
+        # Interest rate impact: higher IR = lower price
+        ir_impact = (base_ir - 0.03) * -0.2
+        
+        # Combined impact
+        total_impact = debt_impact + margin_impact + ir_impact
+        adjusted_yhat = base_yhat * (1 + total_impact)
+        
+        fig = go.Figure()
+        
+        # Historical data
+        if not forecast_hist.empty and 'y' in forecast_hist.columns:
+            fig.add_trace(go.Scatter(
+                x=forecast_hist['ds'],
+                y=forecast_hist['y'],
+                mode='lines+markers',
+                name='Historical',
+                line=dict(color='rgba(100, 100, 100, 0.5)', width=2),
+                marker=dict(size=3, color='gray')
+            ))
+        
+        # Base forecast (gray, dashed)
+        fig.add_trace(go.Scatter(
+            x=dates_future,
+            y=base_yhat,
+            mode='lines',
+            name='Base Forecast',
+            line=dict(color='rgba(149, 165, 166, 0.5)', width=2, dash='dash'),
+            hovertemplate='<b>Base</b><br>Date: %{x}<br>Price: $%{y:.2f}<extra></extra>'
+        ))
+        
+        # Scenario forecast (bright, solid)
+        fig.add_trace(go.Scatter(
+            x=dates_future,
+            y=adjusted_yhat,
+            mode='lines+markers',
+            name='Scenario Forecast',
+            line=dict(color='#00ff00', width=4),
+            marker=dict(size=6, color='#00ff00'),
+            hovertemplate=f'<b>Scenario</b><br>Date: %{{x}}<br>Price: $%{{y:.2f}}<br>Debt: {base_debt:.2f}<br>Margin: {base_margin*100:.2f}%<br>IR: {base_ir*100:.2f}%<extra></extra>'
+        ))
+        
+        # Calculate impact annotation
+        price_change = adjusted_yhat[-1] - base_yhat[-1]
+        price_change_pct = (price_change / base_yhat[-1]) * 100 if base_yhat[-1] > 0 else 0
+        
+        fig.add_annotation(
+            x=dates_future.iloc[-1],
+            y=adjusted_yhat[-1],
+            text=f"{'+' if price_change >= 0 else ''}${price_change:.2f}<br>({price_change_pct:+.1f}%)",
+            showarrow=True,
+            arrowhead=2,
+            ax=0,
+            ay=-40,
+            bgcolor='rgba(0, 255, 0, 0.8)' if price_change >= 0 else 'rgba(255, 0, 0, 0.8)',
+            bordercolor='white',
+            font=dict(color='white', size=12, weight='bold')
+        )
+        
+        ticker_name = ticker if ticker else "Data"
+        fig.update_layout(
+            title=dict(
+                text=f"Scenario Simulator: Sensitivity Analysis ({ticker_name})<br><sub>Debt: {base_debt:.2f} | Margin: {base_margin*100:.1f}% | IR: {base_ir*100:.1f}%</sub>",
+                font=dict(size=18, family='Arial Black')
+            ),
+            xaxis_title="Date",
+            yaxis_title="Price (USD)",
+            height=600,
+            hovermode='x unified',
+            plot_bgcolor='white',
+            paper_bgcolor='white'
+        )
+        
+        return fig
+        
+    except Exception as e:
+        print(f"Error in plot_scenario_simulator: {str(e)}")
+        return None
 
 def plot_financial_health_radar(*args, **kwargs):
     return None
@@ -979,4 +1604,4 @@ def plot_volume_pressure(*args, **kwargs):
     return None
 
 def plot_valuation_band(*args, **kwargs):
-    return None
+        return None
