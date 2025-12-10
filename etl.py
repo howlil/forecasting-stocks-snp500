@@ -375,12 +375,14 @@ def process_etl_from_df(df: pd.DataFrame, clean_method: str = 'ffill',
     
     if len(df) > 500000:
         # Process in chunks for very large dataframes
-        chunk_size = 200000
+        # Use smaller chunks for very large files to reduce memory peak
+        chunk_size = 100000 if len(df) > 2000000 else 200000
         cleaned_chunks = []
         total_chunks = (len(df) // chunk_size) + 1
         
         for i in range(0, len(df), chunk_size):
-            chunk = df.iloc[i:i+chunk_size].copy()
+            # Use iloc without copy first, only copy if necessary
+            chunk = df.iloc[i:i+chunk_size]
             chunk = clean_nulls(chunk, method=clean_method)
             cleaned_chunks.append(chunk)
             
@@ -399,12 +401,12 @@ def process_etl_from_df(df: pd.DataFrame, clean_method: str = 'ffill',
                     pass
             
             # Beri kesempatan Streamlit untuk mengirim update ke browser
-            if chunk_num % 5 == 0:  # Setiap 5 chunks
-                time.sleep(0.05)  # Jeda kecil untuk mencegah WebSocket timeout
-            
-            gc.collect()
+            if chunk_num % 3 == 0:  # Setiap 3 chunks untuk file besar
+                time.sleep(0.03)  # Jeda kecil untuk mencegah WebSocket timeout
+                gc.collect()  # More frequent GC for large files
         
-        df = pd.concat(cleaned_chunks, ignore_index=True)
+        # Combine with copy=False to save memory
+        df = pd.concat(cleaned_chunks, ignore_index=True, copy=False)
         del cleaned_chunks
         gc.collect()
     else:
@@ -438,12 +440,14 @@ def process_etl_from_df(df: pd.DataFrame, clean_method: str = 'ffill',
         
         if len(df) > 500000:
             # Process in chunks
-            chunk_size = 200000
+            # Use smaller chunks for very large files
+            chunk_size = 100000 if len(df) > 2000000 else 200000
             feature_chunks = []
             total_chunks = (len(df) // chunk_size) + 1
             
             for i in range(0, len(df), chunk_size):
-                chunk = df.iloc[i:i+chunk_size].copy()
+                # Use iloc without copy first
+                chunk = df.iloc[i:i+chunk_size]
                 chunk = calculate_daily_returns(chunk)
                 chunk = calculate_volatility(chunk, window=30)
                 feature_chunks.append(chunk)
@@ -463,12 +467,12 @@ def process_etl_from_df(df: pd.DataFrame, clean_method: str = 'ffill',
                         pass
                 
                 # Beri kesempatan Streamlit untuk mengirim update ke browser
-                if chunk_num % 5 == 0:  # Setiap 5 chunks
-                    time.sleep(0.05)  # Jeda kecil untuk mencegah WebSocket timeout
-                
-                gc.collect()
+                if chunk_num % 3 == 0:  # Setiap 3 chunks untuk file besar
+                    time.sleep(0.03)  # Jeda kecil untuk mencegah WebSocket timeout
+                    gc.collect()  # More frequent GC for large files
             
-            df = pd.concat(feature_chunks, ignore_index=True)
+            # Combine with copy=False to save memory
+            df = pd.concat(feature_chunks, ignore_index=True, copy=False)
             del feature_chunks
             gc.collect()
         else:
@@ -484,7 +488,7 @@ def process_etl_from_df(df: pd.DataFrame, clean_method: str = 'ffill',
     
     # Step 4: Scale Close price (skip for very large datasets to save memory)
     scalers_info = None
-    if scale_close and len(df) <= 2000000:  # Only scale if not too large
+    if scale_close and len(df) <= 1000000:  # Only scale if not too large (reduced threshold)
         try:
             if status_text is not None:
                 status_text.text("Scaling Close price...")
