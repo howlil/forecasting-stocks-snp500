@@ -458,29 +458,20 @@ elif page == "📊 ETL Results":
                         import gc
                         from utils import downsample_data
                         
-                        # Aktifkan downsampling dengan target_rows untuk menghindari MemoryError
-                        if enable_downsample:
-                            # Downsampling agresif berdasarkan ukuran file
-                            if file_size_mb > 100:
-                                target_rows = 500000  # 500k rows untuk file besar (menghindari MemoryError)
-                            else:
-                                target_rows = 1000000  # 1M rows untuk file sedang
-                        else:
-                            # Jika downsampling tidak aktif, tetap batasi untuk file besar
-                            if file_size_mb > 100:
-                                target_rows = 1000000  # Force limit untuk file besar
-                            else:
-                                target_rows = None  # No limit untuk file kecil-medium
+                        # Chunking untuk optimasi memory - minimal 1 juta rows
+                        # Tidak ada downsampling yang membatasi, hanya chunking untuk efisiensi
+                        target_rows = None  # Tidak ada limit - ambil semua data dengan chunking
                         
                         # Chunk size disesuaikan dengan ukuran file untuk optimasi memory
+                        # Chunking memungkinkan file besar diproses tanpa MemoryError
                         if file_size_mb > 100:
-                            chunk_size = 30000  # Chunk lebih kecil untuk file besar
+                            chunk_size = 50000  # 50k rows per chunk untuk file besar
                         elif file_size_mb > 50:
-                            chunk_size = 40000  # Chunk sedang untuk file sedang
+                            chunk_size = 50000  # 50k rows per chunk untuk file sedang
                         else:
-                            chunk_size = 50000  # Chunk normal
+                            chunk_size = 50000  # 50k rows per chunk
                         
-                        max_chunks = None if target_rows is None else min(500, (target_rows // chunk_size) + 20)
+                        max_chunks = None  # Tidak ada limit chunks - ambil semua data
                         
                         uploaded_file.seek(0)
                         
@@ -498,10 +489,7 @@ elif page == "📊 ETL Results":
                             # Start reading file
                             if status_text is not None:
                                 try:
-                                    if target_rows is not None:
-                                        status_text.text(f"📖 Membaca file (target: {target_rows:,} rows dengan downsampling)...")
-                                    else:
-                                        status_text.text(f"📖 Membaca file (mengambil semua data dengan optimasi memory)...")
+                                    status_text.text(f"📖 Membaca file dengan chunking (minimal 1M rows, bisa lebih)...")
                                 except Exception:
                                     pass
                             
@@ -592,34 +580,20 @@ elif page == "📊 ETL Results":
                                     if chunk['Date'].dtype == 'object' or 'datetime' not in str(chunk['Date'].dtype).lower():
                                         chunk['Date'] = pd.to_datetime(chunk['Date'], errors='coerce')
                                 
-                                # Check if we've reached target rows (jika downsampling aktif)
-                                if target_rows is not None and total_rows + len(chunk) > target_rows:
-                                    # Take only what we need
-                                    remaining_rows = target_rows - total_rows
-                                    if remaining_rows > 0:
-                                        chunk = chunk.iloc[:remaining_rows]
-                                        chunk_list.append(chunk)
-                                        total_rows += len(chunk)
-                                        break
-                                
+                                # Ambil semua chunk tanpa batasan - chunking hanya untuk optimasi memory
                                 chunk_list.append(chunk)
                                 total_rows += len(chunk)
                                 
                                 # Update progress dengan jeda untuk mencegah WebSocket timeout
                                 if progress_bar is not None and i % 10 == 0:  # Update setiap 10 chunks
                                     try:
-                                        if target_rows is not None:
-                                            progress = min(95, int((total_rows / target_rows) * 90))
-                                        else:
-                                            progress = min(95, 10 + int((i / 200) * 85))
+                                        # Progress berdasarkan jumlah chunks yang sudah dibaca
+                                        # Estimasi: setiap 20 chunks = ~1M rows (dengan chunk_size 50k)
+                                        progress = min(95, 10 + int((i / 20) * 85))  # Progress 10-95% berdasarkan chunks
                                         progress_bar.progress(progress)
                                         time.sleep(0.01)  # Jeda kecil untuk mencegah WebSocket timeout
                                     except Exception:
                                         pass  # Ignore WebSocket errors during progress update
-                                
-                                # Stop if we've read enough chunks (jika ada limit)
-                                if max_chunks is not None and i >= max_chunks - 1:
-                                    break
                                 
                                 # Aggressive memory cleanup every 3 chunks untuk file besar
                                 if len(chunk_list) % 3 == 0:
@@ -680,12 +654,8 @@ elif page == "📊 ETL Results":
                                 except Exception:
                                     pass
                             
-                            # Additional downsampling if still too large (jika downsampling aktif)
-                            if target_rows is not None and len(df_combined) > target_rows:
-                                df_combined = downsample_data(df_combined, max_rows=target_rows)
-                                safe_info(f"📊 Data di-downsample menjadi {len(df_combined):,} rows untuk menghindari MemoryError.")
-                            else:
-                                safe_info(f"📊 Data berhasil dimuat: {len(df_combined):,} rows")
+                            # Tidak ada downsampling - semua data diambil dengan chunking
+                            safe_info(f"📊 Data berhasil dimuat: {len(df_combined):,} rows (menggunakan chunking untuk optimasi memory)")
                             
                             # Process ETL from dataframe with memory optimization
                             if status_text is not None:
@@ -1112,35 +1082,6 @@ elif page == "📊 ETL Results":
         
         st.markdown("---")
         
-        # Processing Steps Applied
-        st.markdown("### ⚙️ Langkah-Langkah Preprocessing yang Diterapkan")
-        
-        steps_applied = []
-        
-        # Check cleaning method
-        if st.session_state.metadata.get('null_info'):
-            steps_applied.append("✅ **Null Value Cleaning**: Forward fill (ffill) untuk mengisi missing values")
-        
-        # Check feature calculation
-        if 'Daily_Return' in st.session_state.df_processed.columns or 'Volatility' in st.session_state.df_processed.columns:
-            steps_applied.append("✅ **Feature Engineering**: Menghitung Daily Return dan Volatility (30-day rolling)")
-        
-        # Check scaling
-        if st.session_state.metadata.get('scalers'):
-            steps_applied.append("✅ **Scaling**: Normalisasi Close price menggunakan MinMaxScaler")
-        
-        # Check date parsing
-        if 'Date' in st.session_state.df_processed.columns and pd.api.types.is_datetime64_any_dtype(st.session_state.df_processed['Date']):
-            steps_applied.append("✅ **Date Parsing**: Konversi kolom Date ke format datetime")
-        
-        if steps_applied:
-            for step in steps_applied:
-                st.markdown(step)
-        else:
-            st.info("ℹ️ Informasi langkah preprocessing tidak tersedia")
-        
-        st.markdown("---")
-        
         # Sample Data Preview
         st.markdown("### 👀 Preview Data")
         st.caption("Menampilkan 10 baris pertama dan 10 baris terakhir dari data yang sudah diproses")
@@ -1336,129 +1277,136 @@ elif page == "🔍 Exploratory Data Analysis":
             except Exception as e:
                 safe_error(f"Error membuat line chart: {str(e)}")
             
-            # 2. Volume Pressure Chart (Pengganti Histogram)
-            st.subheader("2. Volume Pressure: Price x Volume Strength")
-            st.markdown("""
-            **Konsep**: Menggabungkan harga dan volume untuk melihat kekuatan trend. 
-            Bar Volume hijau = harga naik (didukung pasar), Bar Volume merah = harga turun (lemah).
-            Jika harga naik tapi volume kecil = kenaikan lemah (fakeout).
-            """)
+            # 2. Fundamental Divergence Chart (Dual-Axis)
+            st.subheader("2. Fundamental Divergence: Harga vs Kinerja Perusahaan")
             
-            # Filter khusus untuk Volume Pressure Chart
+            # Filter khusus untuk Fundamental Divergence
             with st.expander("⚙️ Filter Visualisasi", expanded=False):
                 col1, col2 = st.columns(2)
                 with col1:
-                    volume_chart_height = st.slider("Chart Height", 300, 800, 500, 50, key="volume_height")
-                    show_candlestick = st.checkbox("Tampilkan Candlestick", value=False, key="volume_candlestick")
+                    divergence_height = st.slider("Chart Height", 300, 800, 500, 50, key="divergence_height")
+                    fundamental_metric = st.selectbox(
+                        "Fundamental Metric",
+                        ["ROE", "Net_Profit_Margin", "EBIT_Margin"],
+                        index=0,
+                        help="Pilih metrik fundamental untuk dibandingkan dengan harga",
+                        key="divergence_metric"
+                    )
                 with col2:
-                    volume_resample = st.selectbox(
+                    show_divergence_zones = st.checkbox("Tampilkan Zona Divergence", value=True, key="divergence_zones")
+                    resample_divergence = st.selectbox(
                         "Resample Frequency",
                         ["None", "Weekly", "Monthly"],
-                        index=0,
-                        key="volume_resample"
-                    )
-                    min_volume_threshold = st.number_input(
-                        "Minimum Volume Threshold",
-                        min_value=0,
-                        value=0,
-                        help="Filter volume di bawah threshold ini",
-                        key="volume_threshold"
+                        index=1,
+                        key="divergence_resample"
                     )
             
             try:
-                # Apply filters untuk Volume Pressure
-                df_volume_filtered = df_viz.copy()
-                
-                # Apply volume threshold filter
-                if min_volume_threshold > 0 and 'Volume' in df_volume_filtered.columns:
-                    df_volume_filtered = df_volume_filtered[df_volume_filtered['Volume'] >= min_volume_threshold]
-                
-                # Apply resample jika dipilih
-                if volume_resample != "None" and 'Date' in df_volume_filtered.columns:
-                    df_volume_filtered['Date'] = pd.to_datetime(df_volume_filtered['Date'])
-                    df_volume_filtered = df_volume_filtered.set_index('Date')
-                    if volume_resample == "Weekly":
-                        df_volume_filtered = df_volume_filtered.resample('W').agg({
-                            'Close': 'last',
-                            'Volume': 'sum',
-                            'Open': 'first' if 'Open' in df_volume_filtered.columns else 'last',
-                            'High': 'max' if 'High' in df_volume_filtered.columns else 'last',
-                            'Low': 'min' if 'Low' in df_volume_filtered.columns else 'last'
-                        })
-                    elif volume_resample == "Monthly":
-                        df_volume_filtered = df_volume_filtered.resample('ME').agg({
-                            'Close': 'last',
-                            'Volume': 'sum',
-                            'Open': 'first' if 'Open' in df_volume_filtered.columns else 'last',
-                            'High': 'max' if 'High' in df_volume_filtered.columns else 'last',
-                            'Low': 'min' if 'Low' in df_volume_filtered.columns else 'last'
-                        })
-                    df_volume_filtered = df_volume_filtered.reset_index()
-                
-                fig_volume_pressure = plot_volume_pressure(df_volume_filtered, ticker=selected_ticker_eda)
-                if fig_volume_pressure is not None:
-                    # Apply height filter
-                    fig_volume_pressure.update_layout(height=volume_chart_height)
+                if df_ts is not None and 'Close' in df_ts.columns and fundamental_metric in df_viz.columns:
+                    df_div = df_viz.copy()
+                    df_div['Date'] = pd.to_datetime(df_div['Date'])
+                    df_div = df_div.sort_values('Date')
                     
-                    # Apply candlestick option jika dipilih dan data tersedia
-                    if show_candlestick and all(col in df_volume_filtered.columns for col in ['Open', 'High', 'Low', 'Close']):
-                        # Replace line chart with candlestick
-                        fig_volume_pressure.data = []  # Clear existing traces
-                        df_volume_filtered['Date'] = pd.to_datetime(df_volume_filtered['Date'])
-                        df_volume_filtered = df_volume_filtered.sort_values('Date')
-                        
-                        # Recreate subplots
-                        fig_volume_pressure = make_subplots(
-                            rows=2, cols=1,
-                            row_heights=[0.7, 0.3],
-                            shared_xaxes=True,
-                            vertical_spacing=0.05,
-                            subplot_titles=('Price (Candlestick)', 'Volume')
-                        )
-                        
-                        # Add candlestick
-                        fig_volume_pressure.add_trace(
-                            go.Candlestick(
-                                x=df_volume_filtered['Date'],
-                                open=df_volume_filtered['Open'],
-                                high=df_volume_filtered['High'],
-                                low=df_volume_filtered['Low'],
-                                close=df_volume_filtered['Close'],
-                                name='Price'
-                            ),
-                            row=1, col=1
-                        )
-                        
-                        # Add volume bars
-                        if 'Volume' in df_volume_filtered.columns:
-                            df_volume_filtered['Price_Change'] = df_volume_filtered['Close'].pct_change()
-                            df_volume_filtered['Volume_Color'] = df_volume_filtered['Price_Change'].apply(
-                                lambda x: '#2ecc71' if x >= 0 else '#e74c3c'
-                            )
-                            fig_volume_pressure.add_trace(
-                                go.Bar(
-                                    x=df_volume_filtered['Date'],
-                                    y=df_volume_filtered['Volume'],
-                                    marker_color=df_volume_filtered['Volume_Color'],
-                                    name='Volume',
-                                    showlegend=False
-                                ),
-                                row=2, col=1
-                            )
-                        
-                        fig_volume_pressure.update_xaxes(title_text="Date", row=2, col=1)
-                        fig_volume_pressure.update_yaxes(title_text="Price (USD)", row=1, col=1)
-                        fig_volume_pressure.update_yaxes(title_text="Volume", row=2, col=1)
-                        fig_volume_pressure.update_layout(
-                            height=volume_chart_height,
-                            hovermode='x unified'
-                        )
+                    # Apply resample jika dipilih
+                    if resample_divergence == "Weekly":
+                        df_div = df_div.set_index('Date').resample('W').agg({
+                            'Close': 'last',
+                            fundamental_metric: 'mean'
+                        }).reset_index()
+                    elif resample_divergence == "Monthly":
+                        df_div = df_div.set_index('Date').resample('ME').agg({
+                            'Close': 'last',
+                            fundamental_metric: 'mean'
+                        }).reset_index()
                     
-                    st.plotly_chart(fig_volume_pressure, width='stretch', key=f'volume_pressure_{selected_ticker_eda}')
+                    # Create figure with secondary y-axis
+                    fig_div = make_subplots(specs=[[{"secondary_y": True}]])
+                    
+                    # Price line (primary y-axis)
+                    fig_div.add_trace(
+                        go.Scatter(
+                            x=df_div['Date'],
+                            y=df_div['Close'],
+                            name='Harga Saham (Close)',
+                            line=dict(color='#1f77b4', width=2)
+                        ),
+                        secondary_y=False
+                    )
+                    
+                    # Fundamental metric line (secondary y-axis)
+                    fig_div.add_trace(
+                        go.Scatter(
+                            x=df_div['Date'],
+                            y=df_div[fundamental_metric],
+                            name=f'{fundamental_metric}',
+                            line=dict(color='#ff7f0e', width=2, dash='dash')
+                        ),
+                        secondary_y=True
+                    )
+                    
+                    # Highlight divergence zones
+                    if show_divergence_zones and len(df_div) > 1:
+                        df_div['Price_Change'] = df_div['Close'].pct_change()
+                        df_div['Fundamental_Change'] = df_div[fundamental_metric].pct_change()
+                        df_div['Divergence'] = df_div.apply(
+                            lambda row: 'Convergence' if (row['Price_Change'] >= 0 and row['Fundamental_Change'] >= 0) or 
+                                        (row['Price_Change'] < 0 and row['Fundamental_Change'] < 0)
+                            else 'Divergence', axis=1
+                        )
+                        
+                        # Add divergence annotations
+                        for i in range(1, len(df_div)):
+                            if df_div.iloc[i]['Divergence'] == 'Divergence':
+                                price_chg = df_div.iloc[i]['Price_Change']
+                                fund_chg = df_div.iloc[i]['Fundamental_Change']
+                                if price_chg > 0 and fund_chg < 0:
+                                    # Bubble warning
+                                    fig_div.add_annotation(
+                                        x=df_div.iloc[i]['Date'],
+                                        y=df_div.iloc[i]['Close'],
+                                        text="⚠️ Bubble",
+                                        showarrow=True,
+                                        arrowhead=2,
+                                        bgcolor="red",
+                                        font=dict(color="white", size=10)
+                                    )
+                                elif price_chg < 0 and fund_chg > 0:
+                                    # Opportunity
+                                    fig_div.add_annotation(
+                                        x=df_div.iloc[i]['Date'],
+                                        y=df_div.iloc[i]['Close'],
+                                        text="💎 Opportunity",
+                                        showarrow=True,
+                                        arrowhead=2,
+                                        bgcolor="green",
+                                        font=dict(color="white", size=10)
+                                    )
+                    
+                    fig_div.update_xaxes(title_text="Date")
+                    fig_div.update_yaxes(title_text="Harga Saham (USD)", secondary_y=False)
+                    fig_div.update_yaxes(title_text=f"{fundamental_metric} (%)", secondary_y=True)
+                    fig_div.update_layout(
+                        title=f"Fundamental Divergence: Harga vs {fundamental_metric}",
+                        hovermode='x unified',
+                        height=divergence_height
+                    )
+                    
+                    st.plotly_chart(fig_div, width='stretch', key=f'divergence_{selected_ticker_eda}')
+                    
+                    # Key Insight
+                    if len(df_div) > 1:
+                        recent_price_chg = df_div['Close'].pct_change().tail(10).mean()
+                        recent_fund_chg = df_div[fundamental_metric].pct_change().tail(10).mean()
+                        if recent_price_chg > 0 and recent_fund_chg > 0:
+                            safe_success("✅ **Key Insight**: Convergence terdeteksi! Harga naik dan fundamental naik = Kenaikan sehat (Fundamental driven).")
+                        elif recent_price_chg > 0 and recent_fund_chg < 0:
+                            safe_error("❌ **Key Insight**: Divergence (Bahaya)! Harga naik TAPI fundamental turun = Saham 'Gorengan' atau Bubble (Harga naik tanpa dukungan kinerja).")
+                        elif recent_price_chg < 0 and recent_fund_chg > 0:
+                            safe_info("💡 **Key Insight**: Opportunity! Harga turun TAPI fundamental naik = Saham Undervalued (Salah harga, peluang beli).")
                 else:
-                    safe_warning("Tidak dapat membuat volume pressure chart. Pastikan data memiliki kolom Date, Close, dan Volume.")
+                    safe_warning(f"Tidak dapat membuat fundamental divergence chart. Pastikan data memiliki kolom Date, Close, dan {fundamental_metric}.")
             except Exception as e:
-                safe_error(f"Error membuat volume pressure chart: {str(e)}")
+                safe_error(f"Error membuat fundamental divergence chart: {str(e)}")
             
             # 3. Heatmap: Correlation Matrix Ratios (fokus ke ratios utama)
             st.subheader("3. Correlation Matrix (Heatmap)")
@@ -1552,51 +1500,99 @@ elif page == "🔍 Exploratory Data Analysis":
             except Exception as e:
                 safe_error(f"Error membuat correlation heatmap: {str(e)}")
             
-            # 4. Valuation Band (Pengganti Box Plot)
-            st.subheader("4. Valuation Band: Is It Cheap or Expensive?")
-            st.markdown("""
-            **Konsep**: Menunjukkan apakah harga "mahal" atau "murah" relatif terhadap fundamental.
-            Triangle hijau = Undervalued (beli), Triangle merah = Overvalued (jual).
-            Lebih relevan daripada box plot karena mempertimbangkan trend dan fundamental.
-            """)
+            # 4. Volatility Band (Bollinger Band Style)
+            st.subheader("4. Volatility Band: Bollinger Band Style Analysis")
             
-            # Filter khusus untuk Valuation Band
+            # Filter khusus untuk Volatility Band
             with st.expander("⚙️ Filter Visualisasi", expanded=False):
                 col1, col2 = st.columns(2)
                 with col1:
-                    valuation_height = st.slider("Chart Height", 300, 800, 500, 50, key="valuation_height")
-                    valuation_method = st.selectbox(
-                        "Valuation Method",
-                        ["Moving Average", "Percentile", "Z-Score"],
-                        index=0,
-                        key="valuation_method"
+                    volatility_height = st.slider("Chart Height", 300, 800, 500, 50, key="volatility_height")
+                    volatility_multiplier = st.slider(
+                        "Volatility Multiplier",
+                        1.0, 3.0, 2.0, 0.5,
+                        help="Faktor untuk menghitung upper/lower band (default: 2.0)",
+                        key="volatility_mult"
                     )
                 with col2:
-                    ma_window = st.number_input(
-                        "Moving Average Window",
-                        min_value=10,
-                        max_value=365,
-                        value=30,
-                        help="Window untuk moving average (jika metode MA dipilih)",
-                        key="valuation_ma_window"
-                    )
-                    show_bands = st.checkbox("Tampilkan Bands", value=True, key="valuation_show_bands")
+                    show_volatility_ma = st.checkbox("Tampilkan Moving Average", value=True, key="volatility_ma")
+                    ma_period_vol = st.number_input("MA Period", min_value=5, max_value=200, value=20, key="volatility_ma_period")
             
             try:
-                fig_valuation = plot_valuation_band(df_viz, ticker=selected_ticker_eda)
-                if fig_valuation is not None:
-                    st.plotly_chart(fig_valuation, width='stretch', key=f'valuation_band_{selected_ticker_eda}')
+                if df_ts is not None and 'Close' in df_ts.columns and 'Volatility_30d' in df_viz.columns:
+                    df_vol = df_viz.copy()
+                    df_vol['Date'] = pd.to_datetime(df_vol['Date'])
+                    df_vol = df_vol.sort_values('Date')
+                    
+                    # Calculate bands
+                    df_vol['Upper_Band'] = df_vol['Close'] + (volatility_multiplier * df_vol['Volatility_30d'] * df_vol['Close'])
+                    df_vol['Lower_Band'] = df_vol['Close'] - (volatility_multiplier * df_vol['Volatility_30d'] * df_vol['Close'])
+                    
+                    fig_vol = go.Figure()
+                    
+                    # Upper band
+                    fig_vol.add_trace(go.Scatter(
+                        x=df_vol['Date'],
+                        y=df_vol['Upper_Band'],
+                        name='Upper Band',
+                        line=dict(color='rgba(255,0,0,0.3)', width=1),
+                        showlegend=True
+                    ))
+                    
+                    # Lower band
+                    fig_vol.add_trace(go.Scatter(
+                        x=df_vol['Date'],
+                        y=df_vol['Lower_Band'],
+                        name='Lower Band',
+                        line=dict(color='rgba(255,0,0,0.3)', width=1),
+                        fill='tonexty',
+                        fillcolor='rgba(255,0,0,0.1)',
+                        showlegend=True
+                    ))
+                    
+                    # Close price
+                    fig_vol.add_trace(go.Scatter(
+                        x=df_vol['Date'],
+                        y=df_vol['Close'],
+                        name='Close Price',
+                        line=dict(color='#1f77b4', width=2)
+                    ))
+                    
+                    # Moving average
+                    if show_volatility_ma:
+                        df_vol['MA'] = df_vol['Close'].rolling(window=ma_period_vol).mean()
+                        fig_vol.add_trace(go.Scatter(
+                            x=df_vol['Date'],
+                            y=df_vol['MA'],
+                            name=f'MA{ma_period_vol}',
+                            line=dict(color='orange', width=2, dash='dash')
+                        ))
+                    
+                    fig_vol.update_layout(
+                        title="Volatility Band (Bollinger Band Style)",
+                        xaxis_title="Date",
+                        yaxis_title="Price (USD)",
+                        hovermode='x unified',
+                        height=volatility_height
+                    )
+                    
+                    st.plotly_chart(fig_vol, width='stretch', key=f'volatility_band_{selected_ticker_eda}')
+                    
+                    # Key Insight
+                    if len(df_vol) > 0:
+                        recent_vol = df_vol['Volatility_30d'].tail(30).mean()
+                        band_width = (df_vol['Upper_Band'].iloc[-1] - df_vol['Lower_Band'].iloc[-1]) / df_vol['Close'].iloc[-1] * 100
+                        if band_width > 20:
+                            safe_warning(f"⚠️ **Key Insight**: Pita volatilitas lebar ({band_width:.1f}%) menunjukkan pasar sedang 'Panik' atau tidak pasti. Hati-hati dengan volatilitas tinggi.")
+                        else:
+                            safe_info(f"✅ **Key Insight**: Pita volatilitas sempit ({band_width:.1f}%) menunjukkan pasar sedang 'Tenang'. Jika harga menembus Upper Band, biasanya indikasi Overbought (terlalu mahal sesaat).")
                 else:
-                    safe_warning("Tidak dapat membuat valuation band. Pastikan data memiliki kolom Date dan Close.")
+                    safe_warning("Tidak dapat membuat volatility band. Pastikan data memiliki kolom Date, Close, dan Volatility_30d.")
             except Exception as e:
-                safe_error(f"Error membuat valuation band: {str(e)}")
+                safe_error(f"Error membuat volatility band: {str(e)}")
             
             # 5. Seasonal Heatmap Calendar (Bonus)
             st.subheader("5. Seasonal Return Heatmap: Best Time to Buy?")
-            st.markdown("""
-            **Konsep**: Pola kalender yang bisa ditindaklanjuti. Hijau pekat = return bulanan positif tinggi, 
-            Merah pekat = rugi. Lihat pola seperti "January Effect" atau "Sell in May".
-            """)
             
             # Filter khusus untuk Seasonal Heatmap
             with st.expander("⚙️ Filter Visualisasi", expanded=False):
@@ -1632,10 +1628,6 @@ elif page == "🔍 Exploratory Data Analysis":
             # 6. Financial Health Radar (Bonus - jika multiple tickers)
             if 'Ticker' in df_viz.columns and df_viz['Ticker'].nunique() > 1:
                 st.subheader("6. Financial Health Radar: Compare Companies")
-                st.markdown("""
-                **Konsep**: Spider chart untuk membandingkan kualitas perusahaan sekilas pandang.
-                Area besar = perusahaan sehat dan efisien, Area kecil = hutang tinggi dan margin tipis.
-                """)
                 
                 # Filter khusus untuk Financial Health Radar
                 with st.expander("⚙️ Filter Visualisasi", expanded=False):
@@ -1692,13 +1684,8 @@ elif page == "🤖 Forecasting":
                 st.session_state.forecast_periods = forecast_periods
             
             with col2:
-                add_regressors = st.checkbox(
-                    "Gunakan Regressors (ROE, Debt_Equity)",
-                    value=st.session_state.add_regressors,
-                    help="Tambahkan regressors untuk meningkatkan akurasi",
-                    key="add_regressors_input"
-                )
-                st.session_state.add_regressors = add_regressors
+                # Regressors tetap aktif, tidak perlu checkbox
+                add_regressors = st.session_state.add_regressors
             
             # Auto-detect split date based on data
             if 'Date' in st.session_state.df_processed.columns:
@@ -1811,11 +1798,15 @@ elif page == "🤖 Forecasting":
                         # Cleanup memory sebelum training
                         gc.collect()
                         
+                        # Pass filtered tickers untuk training hanya ticker yang dipilih
+                        # Gunakan data lengkap (st.session_state.df_processed) tapi hanya train ticker yang dipilih
                         results = train_models_parallel(
-                            st.session_state.df_processed,
+                            st.session_state.df_processed,  # Gunakan data lengkap untuk training
                             split_date=st.session_state.split_date_str,
                             add_regressors=st.session_state.add_regressors,
-                            n_jobs=max_jobs
+                            use_hyperparameter_tuning=True,  # Enable hyperparameter tuning
+                            n_jobs=max_jobs,
+                            tickers_to_train=tickers_to_train  # Pass list ticker yang ingin di-train (sudah di-filter)
                         )
                         
                         # Cleanup setelah training
@@ -1898,14 +1889,10 @@ elif page == "🤖 Forecasting":
                     else:
                         safe_error("Silakan pilih ticker untuk forecast!")
         
-        # Premium Forecasting Visualizations (Bank of England Style)
+        # Forecasting Visualizations (Practical & Insightful)
         if st.session_state.forecasts:
             st.divider()
-            st.header("📊 Premium Forecasting Visualizations")
-            st.markdown("""
-            **Bank of England Standard**: Visualisasi forecasting kelas bank sentral dengan fokus pada risk assessment,
-            attribution analysis, dan market timing. Menggabungkan data teknikal dan fundamental.
-            """)
+            st.header("📊 Forecasting Visualizations")
             
             ticker_viz = selected_ticker_forecast if selected_ticker_forecast else \
                 (df_filtered_forecast['Ticker'].iloc[0] if 'Ticker' in df_filtered_forecast.columns and len(df_filtered_forecast) > 0 else None)
@@ -1914,342 +1901,474 @@ elif page == "🤖 Forecasting":
                 forecast_data = st.session_state.forecasts[ticker_viz]
                 model_data = load_model(ticker_viz) if ticker_viz else None
                 
-                # 1. Fan Chart (Confidence Interval Bands)
-                st.subheader("1. Fan Chart: Confidence Interval Bands")
-                st.markdown("""
-                **Konsep**: Standar emas bank sentral untuk forecasting. Satu garis tengah dikelilingi pita dengan gradasi warna.
-                Area 50% yakin (gelap) dan 95% yakin (pudar). Fan melebar = volatilitas tinggi = kurangi posisi.
-                """)
+                # 1. Forecast Tunnel (Prediksi dengan Rentang Keyakinan)
+                st.subheader("1. Forecast Tunnel: Prediksi dengan Rentang Keyakinan")
                 try:
-                    fig_fan = plot_fan_chart(df_filtered_forecast, forecast_data, ticker=ticker_viz)
-                    if fig_fan is not None:
-                        st.plotly_chart(fig_fan, width='stretch', key=f'fan_{ticker_viz}')
-                    else:
-                        safe_warning("Tidak dapat membuat fan chart. Pastikan forecast memiliki yhat dan CI bands.")
-                except Exception as e:
-                    safe_error(f"Error membuat fan chart: {str(e)}")
-                    
-                # 2. Forecast Bridge (Waterfall Decomposition)
-                st.subheader("2. Forecast Bridge: Price Decomposition")
-                st.markdown("""
-                **Konsep**: Waterfall chart memecah harga prediksi menjadi kontribusi: Trend, Seasonality, Fundamental (ROE, Debt).
-                Batang hijau = faktor positif, batang merah = faktor negatif.
-                Attribution: "Harga naik $20 karena trend ($15) + ROE ($10) - Debt ($5)."
-                """)
-                try:
-                    if model_data:
-                        days_ahead = st.slider(
-                            "Pilih hari ke depan untuk breakdown:",
-                            min_value=1,
-                            max_value=min(90, len(forecast_data) if forecast_data is not None else 90),
-                            value=30,
-                            step=1,
-                            key=f'days_ahead_{ticker_viz}'
-                        )
-                        fig_bridge = plot_forecast_bridge(model_data, forecast_data, ticker=ticker_viz, days_ahead=days_ahead)
-                        if fig_bridge is not None:
-                            st.plotly_chart(fig_bridge, width='stretch', key=f'bridge_{ticker_viz}')
-                        else:
-                            safe_info("Forecast bridge tidak tersedia untuk data ini.")
-                    else:
-                        safe_warning("Model tidak tersedia untuk forecast bridge.")
-                except Exception as e:
-                    safe_error(f"Error membuat forecast bridge: {str(e)}")
-                    
-                # 3. Seasonal Heatmap Matrix
-                st.subheader("3. Seasonal Heatmap Matrix: Market Timing")
-                st.markdown("""
-                **Konsep**: Grid kalender untuk market timing. Sumbu X = Bulan (Jan-Des), Sumbu Y = Tahun.
-                Hijau pekat = Gain tinggi, Merah pekat = Loss dalam.
-                Deteksi pola: "Saham ini SELALU merah di bulan Mei selama 10 tahun terakhir" (Sell in May).
-                """)
-                try:
-                    fig_heatmap = plot_seasonal_heatmap_matrix(df_filtered_forecast, ticker=ticker_viz)
-                    if fig_heatmap is not None:
-                        st.plotly_chart(fig_heatmap, width='stretch', key=f'heatmap_matrix_{ticker_viz}')
-                    else:
-                        safe_warning("Tidak dapat membuat seasonal heatmap matrix. Pastikan data memiliki kolom Date dan Close.")
-                except Exception as e:
-                    safe_error(f"Error membuat seasonal heatmap matrix: {str(e)}")
-                    
-                # 4. Regime Change (Trend Changepoints)
-                st.subheader("4. Regime Change: Trend Changepoints")
-                st.markdown("""
-                **Konsep**: Deteksi perubahan struktur pasar dengan changepoints.
-                Garis vertikal putus-putus merah = structural breaks. Anotasi menunjukkan slope sebelum/sesudah.
-                Momentum Shift: "Trend naik mulai melemah sejak bulan lalu" = sinyal peringatan dini reversal.
-                """)
-                try:
-                    fig_regime = plot_regime_change(df_filtered_forecast, forecast_data, ticker=ticker_viz)
-                    if fig_regime is not None:
-                        st.plotly_chart(fig_regime, width='stretch', key=f'regime_{ticker_viz}')
-                    else:
-                        safe_warning("Tidak dapat membuat regime change chart. Pastikan data memiliki kolom Date dan Close.")
-                except Exception as e:
-                    safe_error(f"Error membuat regime change chart: {str(e)}")
-                
-                # 5. Scenario Simulator (Interactive Sensitivity)
-                st.subheader("5. Scenario Simulator: Interactive Sensitivity Analysis")
-                st.markdown("""
-                **Konsep**: Alat strategi untuk stress testing. Geser slider untuk mengubah variabel kunci,
-                lihat forecast berubah secara real-time. Menjawab: "Seberapa sensitif harga terhadap perubahan fundamental?"
-                """)
-                try:
-                    # Get base values
-                    base_debt = 0.72
-                    base_margin = 0.29
-                    base_ir = 0.03
-                    
-                    if df_filtered_forecast is not None and not df_filtered_forecast.empty:
-                        if 'Debt_Equity' in df_filtered_forecast.columns:
-                            base_debt = df_filtered_forecast['Debt_Equity'].iloc[-1] if pd.notna(df_filtered_forecast['Debt_Equity'].iloc[-1]) else 0.72
-                        elif 'Debt_Equity_Ratio' in df_filtered_forecast.columns:
-                            base_debt = df_filtered_forecast['Debt_Equity_Ratio'].iloc[-1] if pd.notna(df_filtered_forecast['Debt_Equity_Ratio'].iloc[-1]) else 0.72
+                    if 'Date' in df_filtered_forecast.columns and 'Close' in df_filtered_forecast.columns:
+                        df_hist = df_filtered_forecast.copy()
+                        df_hist['Date'] = pd.to_datetime(df_hist['Date'])
+                        df_hist = df_hist.sort_values('Date')
                         
-                        if 'EBIT_Margin' in df_filtered_forecast.columns:
-                            base_margin = df_filtered_forecast['EBIT_Margin'].iloc[-1] if pd.notna(df_filtered_forecast['EBIT_Margin'].iloc[-1]) else 0.29
-                    
-                    col1, col2, col3 = st.columns(3)
-                    with col1:
-                        debt_level = st.slider(
-                            "Debt/Equity Ratio",
-                            min_value=0.0,
-                            max_value=2.0,
-                            value=float(base_debt),
-                            step=0.05,
-                            help="Geser ke kanan (hutang naik) → forecast turun",
-                            key=f'debt_slider_{ticker_viz}'
+                        # Get last year of historical data
+                        last_date = df_hist['Date'].max()
+                        one_year_ago = last_date - pd.Timedelta(days=365)
+                        df_hist_recent = df_hist[df_hist['Date'] >= one_year_ago]
+                        
+                        # Prepare forecast data
+                        forecast_data['ds'] = pd.to_datetime(forecast_data['ds'])
+                        
+                        fig_tunnel = go.Figure()
+                        
+                        # Historical data (solid line)
+                        fig_tunnel.add_trace(go.Scatter(
+                            x=df_hist_recent['Date'],
+                            y=df_hist_recent['Close'],
+                            mode='lines',
+                            name='Historical Data',
+                            line=dict(color='#1f77b4', width=2)
+                        ))
+                        
+                        # Forecast line (dashed)
+                        if 'yhat' in forecast_data.columns:
+                            fig_tunnel.add_trace(go.Scatter(
+                                x=forecast_data['ds'],
+                                y=forecast_data['yhat'],
+                                mode='lines',
+                                name='Forecast (Base)',
+                                line=dict(color='red', width=2, dash='dash')
+                            ))
+                        
+                        # Confidence intervals (shaded area)
+                        if 'yhat_lower' in forecast_data.columns and 'yhat_upper' in forecast_data.columns:
+                            fig_tunnel.add_trace(go.Scatter(
+                                x=forecast_data['ds'],
+                                y=forecast_data['yhat_upper'],
+                                mode='lines',
+                                name='Upper CI',
+                                line=dict(width=0),
+                                showlegend=False
+                            ))
+                            fig_tunnel.add_trace(go.Scatter(
+                                x=forecast_data['ds'],
+                                y=forecast_data['yhat_lower'],
+                                mode='lines',
+                                name='Confidence Interval',
+                                fill='tonexty',
+                                fillcolor='rgba(255,0,0,0.2)',
+                                line=dict(width=0),
+                                showlegend=True
+                            ))
+                        
+                        fig_tunnel.update_layout(
+                            title=f"Forecast Tunnel: {ticker_viz}",
+                            xaxis_title="Date",
+                            yaxis_title="Price (USD)",
+                            hovermode='x unified',
+                            height=500
                         )
-                    with col2:
-                        profit_margin = st.slider(
-                            "Profit Margin (%)",
-                            min_value=0.0,
-                            max_value=50.0,
-                            value=float(base_margin * 100),
-                            step=0.5,
-                            help="Geser ke kanan (margin naik) → forecast naik",
-                            key=f'margin_slider_{ticker_viz}'
-                        ) / 100
-                    with col3:
-                        interest_rate = st.slider(
-                            "Interest Rate (%)",
-                            min_value=0.5,
-                            max_value=10.0,
-                            value=float(base_ir * 100),
-                            step=0.1,
-                            help="Geser ke kanan (IR naik) → forecast turun",
-                            key=f'ir_slider_scenario_{ticker_viz}'
-                        ) / 100
-                    
-                    fig_simulator = plot_scenario_simulator(
-                        df_filtered_forecast, forecast_data,
-                        debt_level=debt_level,
-                        profit_margin=profit_margin,
-                        interest_rate=interest_rate,
-                        ticker=ticker_viz
-                    )
-                    if fig_simulator is not None:
-                        st.plotly_chart(fig_simulator, width='stretch', key=f'simulator_{ticker_viz}')
-                    else:
-                        safe_info("Scenario simulator tidak tersedia untuk data ini.")
-                except Exception as e:
-                    safe_error(f"Error membuat scenario simulator: {str(e)}")
-        else:
-            safe_info("👆 Silakan generate forecast terlebih dahulu untuk melihat visualisasi!")
-        
-        # 3D Immersive Visualizations
-        if st.session_state.forecasts:
-            st.divider()
-            st.header("🌐 3D Immersive Visualizations")
-            st.markdown("""
-            **Premium 3D Experience**: Visualisasi 3D interaktif dengan perspektif yang lebih dalam.
-            Rotate, zoom, dan explore data forecasting dengan cara yang belum pernah Anda lihat sebelumnya.
-            """)
-            
-            ticker_viz = selected_ticker_forecast if selected_ticker_forecast else \
-                (df_filtered_forecast['Ticker'].iloc[0] if 'Ticker' in df_filtered_forecast.columns and len(df_filtered_forecast) > 0 else None)
-            
-            if ticker_viz and ticker_viz in st.session_state.forecasts:
-                forecast_data = st.session_state.forecasts[ticker_viz]
-                model_data = load_model(ticker_viz) if ticker_viz else None
-                
-                # 1. Neon Time-Tunnel (3D Perspective)
-                st.subheader("1. Neon Time-Tunnel: 3D Road to Future")
-                st.markdown("""
-                **Konsep**: Perspektif 3D seperti menyetir ke masa depan. 
-                Garis tengah neon = trend forecast, dinding transparan = uncertainty (semakin lebar = semakin tidak pasti).
-                Objek merah = anomali historis yang menabrak dinding.
-                """)
-                try:
-                    col1, col2 = st.columns(2)
-                    with col1:
-                        show_uncertainty = st.checkbox("Tampilkan Uncertainty Walls", value=True, key=f'uncertainty_{ticker_viz}')
-                    with col2:
-                        highlight_anomalies = st.checkbox("Highlight Anomalies", value=True, key=f'anomalies_{ticker_viz}')
-                    
-                    fig_tunnel = plot_neon_time_tunnel(
-                        df_filtered_forecast, forecast_data, 
-                        ticker=ticker_viz,
-                        show_uncertainty=show_uncertainty,
-                        highlight_anomalies=highlight_anomalies
-                    )
-                    if fig_tunnel is not None:
+                        
                         st.plotly_chart(fig_tunnel, width='stretch', key=f'tunnel_{ticker_viz}')
-                    else:
-                        safe_warning("Tidak dapat membuat neon time-tunnel. Pastikan forecast memiliki yhat dan CI bands.")
-                except Exception as e:
-                    safe_error(f"Error membuat neon time-tunnel: {str(e)}")
-        
-                # 2. Decomposition Glass Stack (3D Layers)
-                st.subheader("2. Decomposition Glass Stack: Isi Perut Harga")
-                st.markdown("""
-                **Konsep**: 3 layer kaca transparan bertumpuk (Trend, Seasonality, Regressors).
-                Garis putih tebal = forecast final yang menembus semua layer.
-                Rotate untuk melihat dari berbagai sudut, tekan "Explode" untuk memisahkan layer.
-                """)
-                try:
-                    explode_layers = st.checkbox("Explode Layers", value=False, key=f'explode_{ticker_viz}')
-                    fig_glass = plot_decomposition_glass_stack(
-                        model_data, forecast_data, 
-                        ticker=ticker_viz,
-                        explode_layers=explode_layers
-                    )
-                    if fig_glass is not None:
-                        st.plotly_chart(fig_glass, width='stretch', key=f'glass_{ticker_viz}')
-                    else:
-                        safe_info("Decomposition glass stack tidak tersedia untuk data ini.")
-                except Exception as e:
-                    safe_error(f"Error membuat decomposition glass stack: {str(e)}")
-        
-                # 3. Seasonal Helix (3D Spiral)
-                st.subheader("3. Seasonal Helix: DNA of Market Cycles")
-                st.markdown("""
-                **Konsep**: Waktu berputar dalam spiral 3D. Satu putaran = 1 tahun.
-                Hijau = periode untung, Merah = periode rugi.
-                Lihat pola vertikal untuk melihat bulan yang selalu baik/buruk setiap tahunnya.
-                """)
-                try:
-                    if 'Date' in df_filtered_forecast.columns:
-                        df_dates = pd.to_datetime(df_filtered_forecast['Date'])
-                        min_year = int(df_dates.min().year)
-                        max_year = int(df_dates.max().year)
                         
-                        year_range = st.slider(
-                            "Filter Tahun",
-                            min_value=min_year,
-                            max_value=max_year,
-                            value=(min_year, max_year),
-                            key=f'year_range_{ticker_viz}'
-                        )
-                        
-                        fig_helix = plot_seasonal_helix(
-                            df_filtered_forecast, forecast_data,
-                            ticker=ticker_viz,
-                            years_filter=year_range
-                        )
-                        if fig_helix is not None:
-                            st.plotly_chart(fig_helix, width='stretch', key=f'helix_{ticker_viz}')
-                        else:
-                            safe_info("Seasonal helix tidak tersedia. Pastikan data memiliki kolom Date dan Close.")
+                        # Key Insight
+                        if 'yhat_upper' in forecast_data.columns and 'yhat_lower' in forecast_data.columns:
+                            ci_width = ((forecast_data['yhat_upper'].iloc[-1] - forecast_data['yhat_lower'].iloc[-1]) / forecast_data['yhat'].iloc[-1]) * 100
+                            if ci_width > 10:
+                                safe_warning(f"⚠️ **Key Insight**: Confidence interval lebar ({ci_width:.1f}%) menunjukkan volatilitas tinggi. Harga kemungkinan besar akan bergerak dalam rentang yang luas.")
+                            else:
+                                safe_info(f"✅ **Key Insight**: Confidence interval sempit ({ci_width:.1f}%) menunjukkan prediksi yang lebih pasti. Model cukup yakin dengan arah harga.")
                     else:
-                        safe_warning("Data tidak memiliki kolom Date untuk seasonal helix.")
+                        safe_warning("Tidak dapat membuat forecast tunnel. Pastikan data memiliki kolom Date dan Close.")
                 except Exception as e:
-                    safe_error(f"Error membuat seasonal helix: {str(e)}")
-        
-                # 4. Market Universe (3D Motion Bubble)
-                st.subheader("4. Market Universe: Risk-Reward-Health Space")
-                st.markdown("""
-                **Konsep**: 3D space dengan X = Volatility (Risiko), Y = Expected Return, Z = Fundamental Health.
-                Setiap saham adalah bola yang melayang. Ukuran bola = Market Cap/Volume.
-                Time slider untuk melihat evolusi seiring waktu (jika multiple tickers).
-                """)
+                    safe_error(f"Error membuat forecast tunnel: {str(e)}")
+                
+                # 2. Backtesting: Reality Check (Aktual vs Prediksi)
+                st.subheader("2. Backtesting: Reality Check (Aktual vs Prediksi)")
                 try:
-                    if 'Ticker' in df_filtered_forecast.columns and df_filtered_forecast['Ticker'].nunique() > 1:
-                        years_available = sorted(df_filtered_forecast['Date'].dt.year.unique()) if 'Date' in df_filtered_forecast.columns else []
-                        if years_available:
-                            time_slider = st.selectbox(
-                                "Pilih Tahun untuk Animasi",
-                                ['All'] + [str(y) for y in years_available],
-                                index=0,
-                                key=f'time_slider_{ticker_viz}'
+                    if 'Date' in df_filtered_forecast.columns and 'Close' in df_filtered_forecast.columns and model_data:
+                        # Get last year of data for backtesting
+                        df_backtest = df_filtered_forecast.copy()
+                        df_backtest['Date'] = pd.to_datetime(df_backtest['Date'])
+                        df_backtest = df_backtest.sort_values('Date')
+                        
+                        # Split: use last year for backtesting
+                        split_date = df_backtest['Date'].max() - pd.Timedelta(days=365)
+                        df_train = df_backtest[df_backtest['Date'] < split_date]
+                        df_test = df_backtest[df_backtest['Date'] >= split_date]
+                        
+                        if len(df_test) > 0:
+                            # Generate backtest forecast
+                            from modeling import forecast_future
+                            backtest_forecast, _ = forecast_future(
+                                df_train,
+                                ticker_viz,
+                                periods=len(df_test),
+                                model=model_data,
+                                add_regressors=st.session_state.add_regressors
                             )
-                            time_year = int(time_slider) if time_slider != 'All' else None
+                            
+                            if backtest_forecast is not None and len(backtest_forecast) > 0:
+                                fig_backtest = go.Figure()
+                                
+                                # Actual price
+                                fig_backtest.add_trace(go.Scatter(
+                                    x=df_test['Date'],
+                                    y=df_test['Close'],
+                                    mode='lines',
+                                    name='Harga Aktual',
+                                    line=dict(color='blue', width=2)
+                                ))
+                                
+                                # Predicted price
+                                if 'yhat' in backtest_forecast.columns:
+                                    backtest_forecast['ds'] = pd.to_datetime(backtest_forecast['ds'])
+                                    fig_backtest.add_trace(go.Scatter(
+                                        x=backtest_forecast['ds'],
+                                        y=backtest_forecast['yhat'],
+                                        mode='lines',
+                                        name='Harga Prediksi Model',
+                                        line=dict(color='red', width=2, dash='dash')
+                                    ))
+                                
+                                fig_backtest.update_layout(
+                                    title=f"Backtesting: {ticker_viz} (1 Tahun Terakhir)",
+                                    xaxis_title="Date",
+                                    yaxis_title="Price (USD)",
+                                    hovermode='x unified',
+                                    height=500
+                                )
+                                
+                                st.plotly_chart(fig_backtest, width='stretch', key=f'backtest_{ticker_viz}')
+                                
+                                # Calculate accuracy metrics
+                                if 'yhat' in backtest_forecast.columns and len(backtest_forecast) == len(df_test):
+                                    actual = df_test['Close'].values
+                                    predicted = backtest_forecast['yhat'].values
+                                    mape = np.mean(np.abs((actual - predicted) / (actual + 1e-8))) * 100
+                                    
+                                    if mape < 5:
+                                        safe_success(f"✅ **Key Insight**: Model sangat akurat! MAPE: {mape:.2f}%. Prediksi mengikuti tren aktual dengan sangat baik, sehingga prediksi ke depan dapat dipercaya.")
+                                    elif mape < 10:
+                                        safe_info(f"ℹ️ **Key Insight**: Model cukup akurat. MAPE: {mape:.2f}%. Prediksi mengikuti tren aktual dengan baik.")
+                                    else:
+                                        safe_warning(f"⚠️ **Key Insight**: Model memiliki akurasi sedang. MAPE: {mape:.2f}%. Gunakan prediksi dengan hati-hati dan pertimbangkan faktor eksternal.")
                         else:
-                            time_year = None
+                            safe_warning("Tidak cukup data untuk backtesting. Perlu minimal 1 tahun data.")
                     else:
-                        time_year = None
-                    
-                    fig_universe = plot_market_universe(
-                        df_filtered_forecast, forecast_data,
-                        ticker=ticker_viz,
-                        time_slider=time_year
-                    )
-                    if fig_universe is not None:
-                        st.plotly_chart(fig_universe, width='stretch', key=f'universe_{ticker_viz}')
-                    else:
-                        safe_info("Market universe memerlukan multiple tickers untuk perbandingan.")
+                        safe_warning("Tidak dapat membuat backtesting. Pastikan data memiliki kolom Date, Close, dan model tersedia.")
                 except Exception as e:
-                    safe_error(f"Error membuat market universe: {str(e)}")
-        
-                # 5. What-If Terrain (3D Surface Simulation)
-                st.subheader("5. What-If Terrain: Economic Simulation")
-                st.markdown("""
-                **Konsep**: Permukaan topografi 3D yang berubah berdasarkan variabel ekonomi.
-                X = Waktu, Y = Interest Rate, Z = Harga Saham.
-                Geser slider untuk mengubah suku bunga dan lihat permukaan berubah secara real-time!
-                """)
+                    safe_error(f"Error membuat backtesting: {str(e)}")
+                
+                # 3. Analisa Musiman (Seasonality Heatmap)
+                st.subheader("3. Analisa Musiman: Seasonal Pattern Analysis")
                 try:
-                    col1, col2 = st.columns(2)
-                    with col1:
-                        interest_rate = st.slider(
-                            "Interest Rate (%)",
-                            min_value=0.5,
-                            max_value=10.0,
-                            value=3.0,
-                            step=0.1,
-                            help="Geser untuk melihat impact suku bunga pada harga saham",
-                            key=f'ir_slider_{ticker_viz}'
-                        ) / 100
-                    with col2:
-                        inflation = st.slider(
-                            "Inflation Rate (%)",
-                            min_value=0.0,
-                            max_value=10.0,
-                            value=2.0,
-                            step=0.1,
-                            help="Geser untuk melihat impact inflasi",
-                            key=f'inflation_slider_{ticker_viz}'
-                        ) / 100
-                    
-                    fig_terrain = plot_what_if_terrain(
-                        df_filtered_forecast, forecast_data,
-                        ticker=ticker_viz,
-                        interest_rate=interest_rate,
-                        inflation=inflation
-                    )
-                    if fig_terrain is not None:
-                        st.plotly_chart(fig_terrain, width='stretch', key=f'terrain_{ticker_viz}')
+                    if 'Date' in df_filtered_forecast.columns and 'Close' in df_filtered_forecast.columns:
+                        df_seasonal = df_filtered_forecast.copy()
+                        df_seasonal['Date'] = pd.to_datetime(df_seasonal['Date'])
+                        df_seasonal = df_seasonal.sort_values('Date')
+                        df_seasonal['Year'] = df_seasonal['Date'].dt.year
+                        df_seasonal['Month'] = df_seasonal['Date'].dt.month
+                        df_seasonal['Return'] = df_seasonal['Close'].pct_change() * 100
+                        
+                        # Create monthly average returns
+                        monthly_returns = df_seasonal.groupby('Month')['Return'].mean()
+                        
+                        # Create heatmap data
+                        years = sorted(df_seasonal['Year'].unique())
+                        months = range(1, 13)
+                        month_names = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+                        
+                        heatmap_data = []
+                        for year in years:
+                            year_data = df_seasonal[df_seasonal['Year'] == year]
+                            month_returns = []
+                            for month in months:
+                                month_data = year_data[year_data['Month'] == month]
+                                if len(month_data) > 0:
+                                    month_returns.append(month_data['Return'].mean())
+                                else:
+                                    month_returns.append(0)
+                            heatmap_data.append(month_returns)
+                        
+                        fig_heatmap = go.Figure(data=go.Heatmap(
+                            z=heatmap_data,
+                            x=month_names,
+                            y=[str(y) for y in years],
+                            colorscale='RdYlGn',
+                            zmid=0,
+                            colorbar=dict(title="Return (%)")
+                        ))
+                        
+                        fig_heatmap.update_layout(
+                            title=f"Seasonal Return Heatmap: {ticker_viz}",
+                            xaxis_title="Month",
+                            yaxis_title="Year",
+                            height=600
+                        )
+                        
+                        st.plotly_chart(fig_heatmap, width='stretch', key=f'seasonal_heatmap_{ticker_viz}')
+                        
+                        # Key Insight: Best and worst months
+                        best_month = monthly_returns.idxmax()
+                        worst_month = monthly_returns.idxmin()
+                        best_return = monthly_returns.max()
+                        worst_return = monthly_returns.min()
+                        
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            st.metric("Bulan Terbaik", month_names[best_month-1], f"{best_return:.2f}%")
+                        with col2:
+                            st.metric("Bulan Terburuk", month_names[worst_month-1], f"{worst_return:.2f}%")
+                        
+                        safe_info(f"💡 **Key Insight**: Rata-rata return terbaik di bulan {month_names[best_month-1]} ({best_return:.2f}%) dan terburuk di bulan {month_names[worst_month-1]} ({worst_return:.2f}%). Gunakan pola ini untuk market timing.")
                     else:
-                        safe_info("What-if terrain tidak tersedia untuk data ini.")
+                        safe_warning("Tidak dapat membuat seasonal heatmap. Pastikan data memiliki kolom Date dan Close.")
                 except Exception as e:
-                    safe_error(f"Error membuat what-if terrain: {str(e)}")
-        
-                # 6. Risk-Reward Motion Quadrant (KEPT - as requested)
-                st.subheader("6. Risk-Reward Motion Quadrant: Stock Journey")
-                st.markdown("""
-                **Konsep**: Animated bubble chart dengan tombol Play.
-                Sumbu X = Volatilitas (Risiko), Sumbu Y = ROE (Profitabilitas).
-                Bubble bergerak dari 2005 ke 2020, menunjukkan evolusi performa saham.
-                Lihat perjalanan dari "High Risk/Low Return" menuju "Low Risk/High Return"!
-                """)
+                    safe_error(f"Error membuat seasonal heatmap: {str(e)}")
+                
+                # 4. Skenario Bull vs Bear (Optimis vs Pesimis)
+                st.subheader("4. Skenario Bull vs Bear: Optimis vs Pesimis")
                 try:
-                    fig_motion = plot_risk_reward_motion(df_filtered_forecast, ticker=ticker_viz)
-                    if fig_motion is not None:
-                        st.plotly_chart(fig_motion, width='stretch', key=f'motion_{ticker_viz}')
+                    if 'yhat' in forecast_data.columns and 'yhat_lower' in forecast_data.columns and 'yhat_upper' in forecast_data.columns:
+                        forecast_data['ds'] = pd.to_datetime(forecast_data['ds'])
+                        
+                        fig_scenarios = go.Figure()
+                        
+                        # Bullish scenario (upper bound)
+                        fig_scenarios.add_trace(go.Scatter(
+                            x=forecast_data['ds'],
+                            y=forecast_data['yhat_upper'],
+                            mode='lines',
+                            name='Bullish (Optimis)',
+                            line=dict(color='green', width=2, dash='dot')
+                        ))
+                        
+                        # Base scenario
+                        fig_scenarios.add_trace(go.Scatter(
+                            x=forecast_data['ds'],
+                            y=forecast_data['yhat'],
+                            mode='lines',
+                            name='Base (Netral)',
+                            line=dict(color='gray', width=2)
+                        ))
+                        
+                        # Bearish scenario (lower bound)
+                        fig_scenarios.add_trace(go.Scatter(
+                            x=forecast_data['ds'],
+                            y=forecast_data['yhat_lower'],
+                            mode='lines',
+                            name='Bearish (Pesimis)',
+                            line=dict(color='red', width=2, dash='dot')
+                        ))
+                        
+                        fig_scenarios.update_layout(
+                            title=f"Bull vs Bear Scenarios: {ticker_viz}",
+                            xaxis_title="Date",
+                            yaxis_title="Price (USD)",
+                            hovermode='x unified',
+                            height=500
+                        )
+                        
+                        st.plotly_chart(fig_scenarios, width='stretch', key=f'scenarios_{ticker_viz}')
+                        
+                        # Key Insight
+                        price_change_bull = ((forecast_data['yhat_upper'].iloc[-1] - forecast_data['yhat'].iloc[0]) / forecast_data['yhat'].iloc[0]) * 100
+                        price_change_bear = ((forecast_data['yhat_lower'].iloc[-1] - forecast_data['yhat'].iloc[0]) / forecast_data['yhat'].iloc[0]) * 100
+                        
+                        col1, col2, col3 = st.columns(3)
+                        with col1:
+                            st.metric("Bullish Scenario", f"{forecast_data['yhat_upper'].iloc[-1]:.2f}", f"{price_change_bull:+.1f}%")
+                        with col2:
+                            st.metric("Base Scenario", f"{forecast_data['yhat'].iloc[-1]:.2f}", "Base")
+                        with col3:
+                            st.metric("Bearish Scenario", f"{forecast_data['yhat_lower'].iloc[-1]:.2f}", f"{price_change_bear:+.1f}%")
+                        
+                        safe_info(f"💡 **Key Insight**: Skenario Bull menunjukkan potensi kenaikan {price_change_bull:+.1f}%, sedangkan Bear menunjukkan risiko penurunan {abs(price_change_bear):.1f}%. Gunakan untuk risk management dan stop loss.")
                     else:
-                        safe_info("Risk-reward motion quadrant tidak tersedia. Pastikan data memiliki kolom Volatility dan ROE.")
+                        safe_warning("Tidak dapat membuat skenario Bull vs Bear. Pastikan forecast memiliki yhat, yhat_lower, dan yhat_upper.")
                 except Exception as e:
-                    safe_error(f"Error membuat risk-reward motion quadrant: {str(e)}")
+                    safe_error(f"Error membuat skenario Bull vs Bear: {str(e)}")
+                
+                # 5. Indikator Teknikal (Moving Average Overlay)
+                st.subheader("5. Indikator Teknikal: Moving Average Overlay")
+                try:
+                    if 'Date' in df_filtered_forecast.columns and 'Close' in df_filtered_forecast.columns:
+                        df_tech = df_filtered_forecast.copy()
+                        df_tech['Date'] = pd.to_datetime(df_tech['Date'])
+                        df_tech = df_tech.sort_values('Date')
+                        
+                        # Get last year + forecast
+                        last_date = df_tech['Date'].max()
+                        one_year_ago = last_date - pd.Timedelta(days=365)
+                        df_tech_recent = df_tech[df_tech['Date'] >= one_year_ago]
+                        
+                        # Combine historical and forecast
+                        forecast_data['ds'] = pd.to_datetime(forecast_data['ds'])
+                        df_combined = pd.concat([
+                            df_tech_recent[['Date', 'Close']].rename(columns={'Date': 'ds', 'Close': 'y'}),
+                            forecast_data[['ds', 'yhat']].rename(columns={'yhat': 'y'})
+                        ], ignore_index=True)
+                        df_combined = df_combined.sort_values('ds')
+                        
+                        # Calculate MAs
+                        df_combined['MA50'] = df_combined['y'].rolling(window=50).mean()
+                        df_combined['MA200'] = df_combined['y'].rolling(window=200).mean()
+                        
+                        fig_ma = go.Figure()
+                        
+                        # Price line
+                        fig_ma.add_trace(go.Scatter(
+                            x=df_combined['ds'],
+                            y=df_combined['y'],
+                            mode='lines',
+                            name='Price (Historical + Forecast)',
+                            line=dict(color='black', width=2)
+                        ))
+                        
+                        # MA50
+                        fig_ma.add_trace(go.Scatter(
+                            x=df_combined['ds'],
+                            y=df_combined['MA50'],
+                            mode='lines',
+                            name='MA50',
+                            line=dict(color='orange', width=2)
+                        ))
+                        
+                        # MA200
+                        fig_ma.add_trace(go.Scatter(
+                            x=df_combined['ds'],
+                            y=df_combined['MA200'],
+                            mode='lines',
+                            name='MA200',
+                            line=dict(color='blue', width=2)
+                        ))
+                        
+                        # Detect Golden Cross / Death Cross
+                        if len(df_combined) > 200:
+                            last_ma50 = df_combined['MA50'].iloc[-1]
+                            last_ma200 = df_combined['MA200'].iloc[-1]
+                            prev_ma50 = df_combined['MA50'].iloc[-2] if len(df_combined) > 1 else last_ma50
+                            prev_ma200 = df_combined['MA200'].iloc[-2] if len(df_combined) > 1 else last_ma200
+                            
+                            # Golden Cross: MA50 crosses above MA200
+                            if prev_ma50 <= prev_ma200 and last_ma50 > last_ma200:
+                                fig_ma.add_annotation(
+                                    x=df_combined['ds'].iloc[-1],
+                                    y=df_combined['y'].iloc[-1],
+                                    text="🟢 GOLDEN CROSS - BUY SIGNAL",
+                                    showarrow=True,
+                                    arrowhead=2,
+                                    bgcolor="green",
+                                    font=dict(color="white", size=14)
+                                )
+                                signal = "BUY"
+                            # Death Cross: MA50 crosses below MA200
+                            elif prev_ma50 >= prev_ma200 and last_ma50 < last_ma200:
+                                fig_ma.add_annotation(
+                                    x=df_combined['ds'].iloc[-1],
+                                    y=df_combined['y'].iloc[-1],
+                                    text="🔴 DEATH CROSS - SELL SIGNAL",
+                                    showarrow=True,
+                                    arrowhead=2,
+                                    bgcolor="red",
+                                    font=dict(color="white", size=14)
+                                )
+                                signal = "SELL"
+                            else:
+                                signal = "HOLD"
+                        else:
+                            signal = "N/A"
+                        
+                        fig_ma.update_layout(
+                            title=f"Technical Indicators: {ticker_viz}",
+                            xaxis_title="Date",
+                            yaxis_title="Price (USD)",
+                            hovermode='x unified',
+                            height=500
+                        )
+                        
+                        st.plotly_chart(fig_ma, width='stretch', key=f'ma_{ticker_viz}')
+                        
+                        # Key Insight
+                        if signal == "BUY":
+                            safe_success(f"🟢 **Key Insight**: GOLDEN CROSS terdeteksi! MA50 memotong ke atas MA200, sinyal BULLISH. Ini adalah sinyal beli yang kuat dalam technical analysis.")
+                        elif signal == "SELL":
+                            safe_error(f"🔴 **Key Insight**: DEATH CROSS terdeteksi! MA50 memotong ke bawah MA200, sinyal BEARISH. Pertimbangkan untuk mengurangi posisi atau memasang stop loss.")
+                        else:
+                            safe_info(f"ℹ️ **Key Insight**: Tidak ada crossover terdeteksi. MA50 dan MA200 masih dalam tren yang sama. Monitor terus untuk sinyal Golden/Death Cross.")
+                    else:
+                        safe_warning("Tidak dapat membuat technical indicators. Pastikan data memiliki kolom Date dan Close.")
+                except Exception as e:
+                    safe_error(f"Error membuat technical indicators: {str(e)}")
+                
+                # 6. Signal Traffic Light (Sinyal Beli/Jual)
+                st.subheader("6. Signal Traffic Light: Sinyal Beli/Jual")
+                try:
+                    if 'yhat' in forecast_data.columns and len(forecast_data) >= 7:
+                        # Calculate 1-week forecast change
+                        current_price = df_filtered_forecast['Close'].iloc[-1] if 'Close' in df_filtered_forecast.columns else forecast_data['yhat'].iloc[0]
+                        week_forecast = forecast_data['yhat'].iloc[6] if len(forecast_data) > 6 else forecast_data['yhat'].iloc[-1]
+                        week_change = ((week_forecast - current_price) / current_price) * 100
+                        
+                        # Calculate probability (based on confidence interval width)
+                        if 'yhat_lower' in forecast_data.columns and 'yhat_upper' in forecast_data.columns:
+                            ci_width = ((forecast_data['yhat_upper'].iloc[6] - forecast_data['yhat_lower'].iloc[6]) / forecast_data['yhat'].iloc[6]) * 100 if len(forecast_data) > 6 else 10
+                            # Narrower CI = higher confidence
+                            probability = max(50, 100 - (ci_width * 2))
+                        else:
+                            probability = 70
+                        
+                        # Determine signal
+                        if week_change > 5:
+                            signal_color = "green"
+                            signal_text = "🟢 STRONG BUY"
+                            signal_desc = f"Prediksi naik {week_change:.1f}% dalam seminggu"
+                        elif week_change > 2:
+                            signal_color = "lightgreen"
+                            signal_text = "🟢 BUY"
+                            signal_desc = f"Prediksi naik {week_change:.1f}% dalam seminggu"
+                        elif week_change < -5:
+                            signal_color = "red"
+                            signal_text = "🔴 SELL"
+                            signal_desc = f"Prediksi turun {abs(week_change):.1f}% dalam seminggu"
+                        elif week_change < -2:
+                            signal_color = "orange"
+                            signal_text = "🟡 WEAK SELL"
+                            signal_desc = f"Prediksi turun {abs(week_change):.1f}% dalam seminggu"
+                        else:
+                            signal_color = "yellow"
+                            signal_text = "🟡 HOLD"
+                            signal_desc = "Prediksi datar/sideways"
+                        
+                        # Display signal box
+                        st.markdown(f"""
+                        <div style="background-color: {signal_color}; padding: 20px; border-radius: 10px; text-align: center; margin: 20px 0;">
+                            <h2 style="color: {'white' if signal_color in ['red', 'green'] else 'black'}; margin: 0;">
+                                {signal_text}
+                            </h2>
+                            <p style="color: {'white' if signal_color in ['red', 'green'] else 'black'}; font-size: 18px; margin: 10px 0;">
+                                {signal_desc}
+                            </p>
+                            <p style="color: {'white' if signal_color in ['red', 'green'] else 'black'}; font-size: 16px; margin: 5px 0;">
+                                Peluang: {probability:.0f}%
+                            </p>
+                        </div>
+                        """, unsafe_allow_html=True)
+                        
+                        # Key Insight
+                        if week_change > 5:
+                            safe_success(f"✅ **Key Insight**: Sinyal STRONG BUY dengan probabilitas {probability:.0f}%. Prediksi menunjukkan kenaikan signifikan ({week_change:.1f}%) dalam seminggu. Pertimbangkan untuk membuka posisi long.")
+                        elif week_change > 2:
+                            safe_info(f"ℹ️ **Key Insight**: Sinyal BUY dengan probabilitas {probability:.0f}%. Prediksi menunjukkan kenaikan moderat ({week_change:.1f}%) dalam seminggu.")
+                        elif week_change < -5:
+                            safe_error(f"❌ **Key Insight**: Sinyal SELL dengan probabilitas {probability:.0f}%. Prediksi menunjukkan penurunan signifikan ({abs(week_change):.1f}%) dalam seminggu. Pertimbangkan untuk mengurangi posisi atau memasang stop loss.")
+                        elif week_change < -2:
+                            safe_warning(f"⚠️ **Key Insight**: Sinyal WEAK SELL dengan probabilitas {probability:.0f}%. Prediksi menunjukkan penurunan moderat ({abs(week_change):.1f}%) dalam seminggu.")
+                        else:
+                            safe_info(f"ℹ️ **Key Insight**: Sinyal HOLD. Prediksi menunjukkan pergerakan sideways. Tunggu sinyal yang lebih jelas sebelum mengambil keputusan.")
+                    else:
+                        safe_warning("Tidak dapat membuat signal traffic light. Pastikan forecast memiliki yhat dan minimal 7 hari ke depan.")
+                except Exception as e:
+                    safe_error(f"Error membuat signal traffic light: {str(e)}")
             else:
                 safe_info("👆 Silakan generate forecast terlebih dahulu untuk melihat visualisasi!")
         else:
@@ -2296,9 +2415,11 @@ elif page == "📈 Model Evaluation":
                     try:
                         # Prepare data for evaluation
                         from modeling import prepare_prophet_data
-                        prophet_df = prepare_prophet_data(
+                        prophet_df, _ = prepare_prophet_data(
                             st.session_state.df_processed, 
-                            ticker=selected_ticker_eval if selected_ticker_eval != 'ALL' else None
+                            ticker=selected_ticker_eval if selected_ticker_eval != 'ALL' else None,
+                            use_log_transform=True,
+                            add_technical_indicators=True
                         )
                         
                         # Get split date
@@ -2447,25 +2568,6 @@ elif page == "📈 Model Evaluation":
                                 except Exception as e:
                                     safe_warning(f"Tidak dapat membuat horizon analysis plot: {str(e)}")
                                 
-                                # Evaluation Report
-                                st.markdown("---")
-                                st.subheader("📄 Evaluation Report")
-                                
-                                report = generate_model_evaluation_report(
-                                    eval_results,
-                                    ticker=selected_ticker_eval
-                                )
-                                
-                                with st.expander("📋 View Full Report", expanded=False):
-                                    st.markdown(report)
-                                
-                                # Download report
-                                st.download_button(
-                                    label="📥 Download Report (TXT)",
-                                    data=report,
-                                    file_name=f"model_evaluation_{selected_ticker_eval}.txt",
-                                    mime="text/plain"
-                                )
                                 
                             else:
                                 safe_error(f"Model untuk {selected_ticker_eval} tidak ditemukan.")
