@@ -1625,41 +1625,319 @@ elif page == "🔍 Exploratory Data Analysis":
             except Exception as e:
                 safe_error(f"Error membuat seasonal heatmap: {str(e)}")
             
-            # 6. Financial Health Radar (Bonus - jika multiple tickers)
-            if 'Ticker' in df_viz.columns and df_viz['Ticker'].nunique() > 1:
-                st.subheader("6. Financial Health Radar: Compare Companies")
+            # 6. Financial Health Radar (Spider Chart)
+            st.subheader("6. Financial Health Radar: 5 Pilar Kesehatan Perusahaan")
+            
+            # Filter khusus untuk Financial Health Radar
+            with st.expander("⚙️ Filter Visualisasi", expanded=False):
+                col1, col2 = st.columns(2)
+                with col1:
+                    radar_height = st.slider("Chart Height", 400, 1000, 600, 50, key="radar_height")
+                    show_radar_fill = st.checkbox("Tampilkan Fill Area", value=True, key="radar_show_fill")
+                with col2:
+                    radar_normalize = st.checkbox("Normalize Values", value=True, help="Normalize untuk perbandingan yang lebih adil", key="radar_normalize")
+            
+            try:
+                # 5 Pilar: ROE, Asset Turnover, Current Ratio, Debt/Equity (inverted), Net Profit Margin
+                radar_metrics = {
+                    'ROE': 'ROE',
+                    'Asset_Turnover': 'Asset_Turnover',
+                    'Current_Ratio': 'Current_Ratio',
+                    'Debt_Equity_Ratio': 'Debt_Equity_Ratio',  # Will be inverted
+                    'Net_Profit_Margin': 'Net_Profit_Margin'
+                }
                 
-                # Filter khusus untuk Financial Health Radar
+                available_metrics = {k: v for k, v in radar_metrics.items() if v in df_viz.columns}
+                
+                if len(available_metrics) >= 3:
+                    # Calculate average per ticker
+                    if 'Ticker' in df_viz.columns:
+                        df_radar = df_viz.groupby('Ticker').agg({
+                            'ROE': 'mean' if 'ROE' in df_viz.columns else 'first',
+                            'Asset_Turnover': 'mean' if 'Asset_Turnover' in df_viz.columns else 'first',
+                            'Current_Ratio': 'mean' if 'Current_Ratio' in df_viz.columns else 'first',
+                            'Debt_Equity_Ratio': 'mean' if 'Debt_Equity_Ratio' in df_viz.columns else 'first',
+                            'Net_Profit_Margin': 'mean' if 'Net_Profit_Margin' in df_viz.columns else 'first'
+                        }).reset_index()
+                    else:
+                        df_radar = pd.DataFrame({
+                            'Ticker': ['ALL'],
+                            'ROE': [df_viz['ROE'].mean()] if 'ROE' in df_viz.columns else [0],
+                            'Asset_Turnover': [df_viz['Asset_Turnover'].mean()] if 'Asset_Turnover' in df_viz.columns else [0],
+                            'Current_Ratio': [df_viz['Current_Ratio'].mean()] if 'Current_Ratio' in df_viz.columns else [0],
+                            'Debt_Equity_Ratio': [df_viz['Debt_Equity_Ratio'].mean()] if 'Debt_Equity_Ratio' in df_viz.columns else [0],
+                            'Net_Profit_Margin': [df_viz['Net_Profit_Margin'].mean()] if 'Net_Profit_Margin' in df_viz.columns else [0]
+                        })
+                    
+                    # Invert Debt/Equity (makin kecil makin bagus)
+                    if 'Debt_Equity_Ratio' in df_radar.columns:
+                        max_debt = df_radar['Debt_Equity_Ratio'].max()
+                        df_radar['Debt_Equity_Inverted'] = max_debt - df_radar['Debt_Equity_Ratio'] + 1
+                    
+                    # Normalize if requested
+                    if radar_normalize:
+                        for col in ['ROE', 'Asset_Turnover', 'Current_Ratio', 'Debt_Equity_Inverted', 'Net_Profit_Margin']:
+                            if col in df_radar.columns:
+                                max_val = df_radar[col].max()
+                                min_val = df_radar[col].min()
+                                if max_val > min_val:
+                                    df_radar[col] = (df_radar[col] - min_val) / (max_val - min_val) * 100
+                    
+                    # Create radar chart
+                    categories = ['ROE', 'Asset Turnover', 'Current Ratio', 'Debt/Equity (Inverted)', 'Net Profit Margin']
+                    
+                    fig_radar = go.Figure()
+                    
+                    for idx, row in df_radar.iterrows():
+                        values = [
+                            row.get('ROE', 0),
+                            row.get('Asset_Turnover', 0),
+                            row.get('Current_Ratio', 0),
+                            row.get('Debt_Equity_Inverted', 0),
+                            row.get('Net_Profit_Margin', 0)
+                        ]
+                        # Close the radar chart
+                        values.append(values[0])
+                        categories_closed = categories + [categories[0]]
+                        
+                        fig_radar.add_trace(go.Scatterpolar(
+                            r=values,
+                            theta=categories_closed,
+                            fill='toself' if show_radar_fill else None,
+                            name=row['Ticker']
+                        ))
+                    
+                    fig_radar.update_layout(
+                        polar=dict(
+                            radialaxis=dict(
+                                visible=True,
+                                range=[0, 100 if radar_normalize else None]
+                            )
+                        ),
+                        showlegend=True,
+                        title="Financial Health Radar: 5 Pilar Kesehatan Perusahaan",
+                        height=radar_height
+                    )
+                    
+                    st.plotly_chart(fig_radar, width='stretch', key=f'health_radar_{selected_ticker_eda}')
+                    
+                    # Key Insight
+                    safe_info("💡 **Key Insight**: Bentuk Segilima Penuh = Perusahaan Sempurna. Bentuk Gepeng/Penyok di satu sisi = Ada masalah fatal (misal: Profit tinggi tapi Hutang menumpuk).")
+                else:
+                    safe_warning("Tidak dapat membuat financial health radar. Pastikan data memiliki minimal 3 dari 5 kolom: ROE, Asset_Turnover, Current_Ratio, Debt_Equity_Ratio, Net_Profit_Margin.")
+            except Exception as e:
+                safe_error(f"Error membuat financial health radar: {str(e)}")
+            
+            # 7. Risk-Reward Quadrant (Scatter Plot)
+            if 'Ticker' in df_viz.columns and df_viz['Ticker'].nunique() > 1:
+                st.subheader("7. Risk-Reward Quadrant: Pilih Saham Terbaik")
+                
+                # Filter khusus untuk Risk-Reward Quadrant
                 with st.expander("⚙️ Filter Visualisasi", expanded=False):
                     col1, col2 = st.columns(2)
                     with col1:
-                        radar_height = st.slider("Chart Height", 400, 1000, 600, 50, key="radar_height")
-                        max_tickers_radar = st.number_input(
-                            "Max Tickers to Compare",
-                            min_value=2,
-                            max_value=10,
-                            value=5,
-                            help="Maksimal jumlah ticker yang dibandingkan",
-                            key="radar_max_tickers"
+                        quadrant_height = st.slider("Chart Height", 400, 1000, 600, 50, key="quadrant_height")
+                        risk_metric = st.selectbox(
+                            "Risk Metric",
+                            ["Volatility_30d", "Debt_Equity_Ratio"],
+                            index=0,
+                            key="quadrant_risk"
                         )
                     with col2:
-                        radar_metrics = st.multiselect(
-                            "Pilih Metrics",
-                            ["ROE", "Net_Profit_Margin", "Current_Ratio", "Asset_Turnover", "Debt_Equity_Ratio"],
-                            default=["ROE", "Net_Profit_Margin", "Current_Ratio", "Asset_Turnover", "Debt_Equity_Ratio"],
-                            help="Pilih metrik yang akan ditampilkan di radar",
-                            key="radar_metrics"
+                        reward_metric = st.selectbox(
+                            "Reward Metric",
+                            ["Daily_Return", "ROE"],
+                            index=0,
+                            key="quadrant_reward"
                         )
-                        show_radar_fill = st.checkbox("Tampilkan Fill Area", value=True, key="radar_show_fill")
+                        use_volume_size = st.checkbox("Gunakan Volume sebagai Ukuran", value=True, key="quadrant_volume")
                 
                 try:
-                    fig_radar = plot_financial_health_radar(df_viz, ticker=selected_ticker_eda)
-                    if fig_radar is not None:
-                        st.plotly_chart(fig_radar, width='stretch', key=f'health_radar_{selected_ticker_eda}')
+                    if risk_metric in df_viz.columns and reward_metric in df_viz.columns:
+                        # Calculate average per ticker
+                        df_quad = df_viz.groupby('Ticker').agg({
+                            risk_metric: 'mean',
+                            reward_metric: 'mean',
+                            'Volume': 'mean' if 'Volume' in df_viz.columns else 'first'
+                        }).reset_index()
+                        
+                        fig_quad = go.Figure()
+                        
+                        # Determine quadrant colors
+                        risk_median = df_quad[risk_metric].median()
+                        reward_median = df_quad[reward_metric].median()
+                        
+                        df_quad['Quadrant'] = df_quad.apply(
+                            lambda row: 'Gems (Low Risk, High Reward)' if row[risk_metric] <= risk_median and row[reward_metric] > reward_median
+                            else 'Toxic (High Risk, Low Reward)' if row[risk_metric] > risk_median and row[reward_metric] <= reward_median
+                            else 'Aggressive (High Risk, High Reward)' if row[risk_metric] > risk_median and row[reward_metric] > reward_median
+                            else 'Conservative (Low Risk, Low Reward)',
+                            axis=1
+                        )
+                        
+                        colors = {
+                            'Gems (Low Risk, High Reward)': 'green',
+                            'Toxic (High Risk, Low Reward)': 'red',
+                            'Aggressive (High Risk, High Reward)': 'orange',
+                            'Conservative (Low Risk, Low Reward)': 'blue'
+                        }
+                        
+                        for quadrant in df_quad['Quadrant'].unique():
+                            df_q = df_quad[df_quad['Quadrant'] == quadrant]
+                            sizes = df_q['Volume'].values if use_volume_size and 'Volume' in df_q.columns else [10] * len(df_q)
+                            
+                            fig_quad.add_trace(go.Scatter(
+                                x=df_q[risk_metric],
+                                y=df_q[reward_metric],
+                                mode='markers+text',
+                                text=df_q['Ticker'],
+                                textposition='top center',
+                                name=quadrant,
+                                marker=dict(
+                                    size=sizes,
+                                    color=colors[quadrant],
+                                    opacity=0.6,
+                                    line=dict(width=1, color='black')
+                                )
+                            ))
+                        
+                        # Add quadrant lines
+                        fig_quad.add_hline(y=reward_median, line_dash="dash", line_color="gray", annotation_text="Reward Median")
+                        fig_quad.add_vline(x=risk_median, line_dash="dash", line_color="gray", annotation_text="Risk Median")
+                        
+                        fig_quad.update_layout(
+                            title="Risk-Reward Quadrant: Pilih Saham Terbaik",
+                            xaxis_title=f"Risk ({risk_metric})",
+                            yaxis_title=f"Reward ({reward_metric})",
+                            height=quadrant_height,
+                            hovermode='closest'
+                        )
+                        
+                        st.plotly_chart(fig_quad, width='stretch', key=f'risk_reward_{selected_ticker_eda}')
+                        
+                        # Key Insight
+                        gems_count = len(df_quad[df_quad['Quadrant'] == 'Gems (Low Risk, High Reward)'])
+                        toxic_count = len(df_quad[df_quad['Quadrant'] == 'Toxic (High Risk, Low Reward)'])
+                        safe_info(f"💡 **Key Insight**: {gems_count} saham di Kuadran Gems (Kiri Atas) = Harta karun. {toxic_count} saham di Kuadran Toxic (Kanan Bawah) = Hindari.")
                     else:
-                        safe_info("Financial health radar tidak tersedia. Pastikan data memiliki kolom financial ratios.")
+                        safe_warning(f"Tidak dapat membuat risk-reward quadrant. Pastikan data memiliki kolom {risk_metric} dan {reward_metric}.")
                 except Exception as e:
-                    safe_error(f"Error membuat financial health radar: {str(e)}")
+                    safe_error(f"Error membuat risk-reward quadrant: {str(e)}")
+            
+            # 8. Volume-Price Pressure Analysis
+            st.subheader("8. Volume-Price Pressure: Deteksi Akumulasi/Distribusi")
+            
+            # Filter khusus untuk Volume-Price Pressure
+            with st.expander("⚙️ Filter Visualisasi", expanded=False):
+                col1, col2 = st.columns(2)
+                with col1:
+                    volume_pressure_height = st.slider("Chart Height", 300, 800, 500, 50, key="volume_pressure_height")
+                    show_volume_ma = st.checkbox("Tampilkan MA Volume", value=True, key="volume_pressure_ma")
+                with col2:
+                    volume_ma_period = st.number_input("MA Volume Period", min_value=5, max_value=50, value=20, key="volume_ma_period")
+                    resample_volume = st.selectbox(
+                        "Resample Frequency",
+                        ["None", "Weekly", "Monthly"],
+                        index=0,
+                        key="volume_pressure_resample"
+                    )
+            
+            try:
+                if df_ts is not None and 'Close' in df_ts.columns and 'Volume' in df_viz.columns:
+                    df_vol_press = df_viz.copy()
+                    df_vol_press['Date'] = pd.to_datetime(df_vol_press['Date'])
+                    df_vol_press = df_vol_press.sort_values('Date')
+                    
+                    # Apply resample jika dipilih
+                    if resample_volume == "Weekly":
+                        df_vol_press = df_vol_press.set_index('Date').resample('W').agg({
+                            'Close': 'last',
+                            'Volume': 'sum'
+                        }).reset_index()
+                    elif resample_volume == "Monthly":
+                        df_vol_press = df_vol_press.set_index('Date').resample('ME').agg({
+                            'Close': 'last',
+                            'Volume': 'sum'
+                        }).reset_index()
+                    
+                    # Calculate price change and volume color
+                    df_vol_press['Price_Change'] = df_vol_press['Close'].pct_change()
+                    df_vol_press['Volume_Color'] = df_vol_press['Price_Change'].apply(
+                        lambda x: '#2ecc71' if x >= 0 else '#e74c3c'
+                    )
+                    
+                    # Calculate MA Volume
+                    if show_volume_ma:
+                        df_vol_press['MA_Volume'] = df_vol_press['Volume'].rolling(window=volume_ma_period).mean()
+                    
+                    # Create subplots
+                    fig_vol_press = make_subplots(
+                        rows=2, cols=1,
+                        row_heights=[0.7, 0.3],
+                        shared_xaxes=True,
+                        vertical_spacing=0.05,
+                        subplot_titles=('Price', 'Volume (Green=Up, Red=Down)')
+                    )
+                    
+                    # Price line
+                    fig_vol_press.add_trace(
+                        go.Scatter(
+                            x=df_vol_press['Date'],
+                            y=df_vol_press['Close'],
+                            name='Close Price',
+                            line=dict(color='#1f77b4', width=2)
+                        ),
+                        row=1, col=1
+                    )
+                    
+                    # Volume bars
+                    fig_vol_press.add_trace(
+                        go.Bar(
+                            x=df_vol_press['Date'],
+                            y=df_vol_press['Volume'],
+                            marker_color=df_vol_press['Volume_Color'],
+                            name='Volume',
+                            showlegend=False
+                        ),
+                        row=2, col=1
+                    )
+                    
+                    # MA Volume
+                    if show_volume_ma:
+                        fig_vol_press.add_trace(
+                            go.Scatter(
+                                x=df_vol_press['Date'],
+                                y=df_vol_press['MA_Volume'],
+                                name=f'MA Volume ({volume_ma_period})',
+                                line=dict(color='orange', width=2, dash='dash')
+                            ),
+                            row=2, col=1
+                        )
+                    
+                    fig_vol_press.update_xaxes(title_text="Date", row=2, col=1)
+                    fig_vol_press.update_yaxes(title_text="Price (USD)", row=1, col=1)
+                    fig_vol_press.update_yaxes(title_text="Volume", row=2, col=1)
+                    fig_vol_press.update_layout(
+                        title="Volume-Price Pressure Analysis",
+                        hovermode='x unified',
+                        height=volume_pressure_height
+                    )
+                    
+                    st.plotly_chart(fig_vol_press, width='stretch', key=f'volume_pressure_{selected_ticker_eda}')
+                    
+                    # Key Insight
+                    if len(df_vol_press) > 1:
+                        recent_price_chg = df_vol_press['Price_Change'].tail(5).mean()
+                        recent_volume = df_vol_press['Volume'].tail(5).mean()
+                        avg_volume = df_vol_press['Volume'].mean()
+                        if recent_price_chg > 0.02 and recent_volume > avg_volume * 1.5:
+                            safe_success("✅ **Key Insight**: Validasi Tren! Harga naik tinggi + Volume Hijau Raksasa = Tren Kuat (Big Money masuk).")
+                        elif recent_price_chg > 0.02 and recent_volume < avg_volume * 0.8:
+                            safe_warning("⚠️ **Key Insight**: Jebakan (Fakeout)! Harga naik tinggi + Volume Kecil/Tipis = Kenaikan palsu, rawan bantingan.")
+                else:
+                    safe_warning("Tidak dapat membuat volume-price pressure chart. Pastikan data memiliki kolom Date, Close, dan Volume.")
+            except Exception as e:
+                safe_error(f"Error membuat volume-price pressure chart: {str(e)}")
             
 
 elif page == "🤖 Forecasting":
