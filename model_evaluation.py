@@ -109,7 +109,59 @@ def evaluate_model_performance(
     """
     # Generate forecast jika belum ada
     if forecast_df is None:
-        forecast_df = model.predict(test_df[['ds']])
+        # Pastikan semua regressor yang dibutuhkan model ada di test_df
+        required_cols = ['ds']
+        
+        # Get regressors dari model (gunakan metadata atau extra_regressors)
+        model_regressors = []
+        if hasattr(model, 'metadata') and 'regressors' in model.metadata:
+            model_regressors = model.metadata['regressors']
+        elif hasattr(model, 'extra_regressors'):
+            model_regressors = list(model.extra_regressors.keys())
+        
+        if model_regressors:
+            # Add all regressors yang dibutuhkan model
+            for regressor in model_regressors:
+                if regressor in test_df.columns:
+                    required_cols.append(regressor)
+                else:
+                    # Jika regressor tidak ada, forward fill dari train_df atau set default
+                    # Ini bisa terjadi jika test_df tidak lengkap
+                    if regressor in train_df.columns:
+                        # Use last value from train_df
+                        last_value = train_df[regressor].iloc[-1] if len(train_df) > 0 else None
+                        if last_value is not None and not pd.isna(last_value):
+                            test_df[regressor] = last_value
+                            required_cols.append(regressor)
+                        else:
+                            # Set default value based on regressor type
+                            if 'RSI' in regressor:
+                                test_df[regressor] = 50.0  # RSI default = 50 (neutral)
+                            elif 'SMA' in regressor:
+                                # Use Close price as default for SMA
+                                if 'y' in test_df.columns and len(test_df) > 0:
+                                    test_df[regressor] = test_df['y'].iloc[0]
+                                else:
+                                    test_df[regressor] = 0
+                            else:
+                                test_df[regressor] = 0  # Default to 0
+                            required_cols.append(regressor)
+                    else:
+                        # Set default value based on regressor type
+                        if 'RSI' in regressor:
+                            test_df[regressor] = 50.0  # RSI default = 50 (neutral)
+                        elif 'SMA' in regressor:
+                            # Use Close price as default for SMA
+                            if 'y' in test_df.columns and len(test_df) > 0:
+                                test_df[regressor] = test_df['y'].iloc[0]
+                            else:
+                                test_df[regressor] = 0
+                        else:
+                            test_df[regressor] = 0  # Default to 0
+                        required_cols.append(regressor)
+        
+        # Predict dengan semua regressor yang dibutuhkan
+        forecast_df = model.predict(test_df[required_cols])
     
     # Extract actual and predicted values
     y_true = test_df['y'].values

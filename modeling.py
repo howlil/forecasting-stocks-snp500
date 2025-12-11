@@ -167,20 +167,21 @@ def prepare_prophet_data(df: pd.DataFrame, ticker: str = None,
 
 
 def optimize_prophet_params(prophet_df: pd.DataFrame, 
-                           initial_periods: int = 365,
-                           period: int = 30,
+                           initial_periods: int = 180,  # Reduced from 365
+                           period: int = 60,  # Increased from 30 (fewer CV iterations)
                            horizon: int = 30):
     """
     Hyperparameter tuning menggunakan Grid Search dengan cross-validation.
+    OPTIMIZED: Reduced combinations and faster CV for speed.
     
     Parameters:
     -----------
     prophet_df : pd.DataFrame
         Dataframe dengan format Prophet (ds, y, regressors)
     initial_periods : int
-        Initial training period untuk cross-validation (default: 365 days)
+        Initial training period untuk cross-validation (default: 180 days - reduced for speed)
     period : int
-        Period antara validasi (default: 30 days)
+        Period antara validasi (default: 60 days - increased to reduce iterations)
     horizon : int
         Horizon untuk validasi (default: 30 days)
     
@@ -188,10 +189,10 @@ def optimize_prophet_params(prophet_df: pd.DataFrame,
     --------
     dict : Best parameters dengan RMSE terendah
     """
-    # Parameter grid untuk grid search
+    # Parameter grid untuk grid search - REDUCED untuk speed
     param_grid = {
-        'changepoint_prior_scale': [0.001, 0.01, 0.05, 0.1, 0.5],
-        'seasonality_prior_scale': [0.01, 0.1, 1.0, 10.0],
+        'changepoint_prior_scale': [0.01, 0.05, 0.1],  # Reduced from 5 to 3
+        'seasonality_prior_scale': [0.1, 1.0, 10.0],  # Reduced from 4 to 3
         'seasonality_mode': ['additive', 'multiplicative']
     }
     
@@ -212,12 +213,22 @@ def optimize_prophet_params(prophet_df: pd.DataFrame,
             'seasonality_mode': 'additive'
         }
     
-    # Limit jumlah kombinasi untuk performa (max 20 kombinasi)
-    max_combinations = 20
+    # Limit jumlah kombinasi untuk performa (max 5 kombinasi - REDUCED dari 20)
+    max_combinations = 5  # Reduced from 20 to 5 for speed
     if len(all_params) > max_combinations:
-        # Sample secara random atau pilih yang paling promising
-        import random
-        all_params = random.sample(all_params, max_combinations)
+        # Pilih kombinasi yang paling promising (bukan random)
+        # Prioritize common good values
+        priority_params = [
+            {'changepoint_prior_scale': 0.05, 'seasonality_prior_scale': 10.0, 'seasonality_mode': 'additive'},
+            {'changepoint_prior_scale': 0.1, 'seasonality_prior_scale': 1.0, 'seasonality_mode': 'additive'},
+            {'changepoint_prior_scale': 0.01, 'seasonality_prior_scale': 10.0, 'seasonality_mode': 'multiplicative'},
+            {'changepoint_prior_scale': 0.05, 'seasonality_prior_scale': 1.0, 'seasonality_mode': 'additive'},
+            {'changepoint_prior_scale': 0.1, 'seasonality_prior_scale': 10.0, 'seasonality_mode': 'additive'},
+        ]
+        # Keep priority params yang ada di all_params
+        priority_in_all = [p for p in priority_params if p in all_params]
+        remaining = [p for p in all_params if p not in priority_in_all]
+        all_params = priority_in_all + remaining[:max_combinations - len(priority_in_all)]
     
     # Try each parameter combination
     for params in all_params:
@@ -244,19 +255,44 @@ def optimize_prophet_params(prophet_df: pd.DataFrame,
             # Fit model
             model.fit(prophet_df)
             
-            # Cross-validation
+            # Cross-validation - OPTIMIZED: Skip if data too small or use simpler validation
             try:
-                df_cv = cross_validation(
-                    model,
-                    initial=f'{initial_periods} days',
-                    period=f'{period} days',
-                    horizon=f'{horizon} days',
-                    disable_tqdm=True
-                )
-                
-                # Calculate RMSE
-                df_perf = performance_metrics(df_cv)
-                rmse = df_perf['rmse'].mean()
+                # Skip CV jika data terlalu kecil untuk mempercepat
+                if len(prophet_df) < initial_periods + horizon + period:
+                    # Use simple train/test split instead
+                    split_idx = int(len(prophet_df) * 0.8)
+                    train_cv = prophet_df.iloc[:split_idx]
+                    test_cv = prophet_df.iloc[split_idx:]
+                    
+                    model_cv = Prophet(
+                        changepoint_prior_scale=params['changepoint_prior_scale'],
+                        seasonality_prior_scale=params['seasonality_prior_scale'],
+                        seasonality_mode=params['seasonality_mode'],
+                        daily_seasonality=False,
+                        weekly_seasonality=True,
+                        yearly_seasonality=True
+                    )
+                    
+                    regressor_cols = [col for col in train_cv.columns if col not in ['ds', 'y']]
+                    for col in regressor_cols:
+                        model_cv.add_regressor(col)
+                    
+                    model_cv.fit(train_cv)
+                    forecast_cv = model_cv.predict(test_cv[['ds'] + regressor_cols])
+                    
+                    rmse = np.sqrt(np.mean((test_cv['y'].values - forecast_cv['yhat'].values[:len(test_cv)]) ** 2))
+                else:
+                    df_cv = cross_validation(
+                        model,
+                        initial=f'{initial_periods} days',
+                        period=f'{period} days',
+                        horizon=f'{horizon} days',
+                        disable_tqdm=True
+                    )
+                    
+                    # Calculate RMSE
+                    df_perf = performance_metrics(df_cv)
+                    rmse = df_perf['rmse'].mean()
                 
                 results.append({
                     'params': params,
@@ -315,10 +351,11 @@ def train_prophet_model(prophet_df: pd.DataFrame, ticker: str,
     Prophet : Trained Prophet model
     dict : Metadata tentang transformasi
     """
-    # Hyperparameter tuning jika diminta
-    if use_hyperparameter_tuning and len(prophet_df) >= 400:  # Minimum data untuk CV
+    # Hyperparameter tuning jika diminta - OPTIMIZED: Skip untuk data kecil
+    if use_hyperparameter_tuning and len(prophet_df) >= 200:  # Reduced from 400 to 200
         try:
-            best_params = optimize_prophet_params(prophet_df)
+            # Quick optimization dengan parameter yang lebih sedikit
+            best_params = optimize_prophet_params(prophet_df, initial_periods=180, period=60, horizon=30)
             changepoint_prior_scale = best_params['changepoint_prior_scale']
             seasonality_prior_scale = best_params['seasonality_prior_scale']
             seasonality_mode = best_params['seasonality_mode']
@@ -388,10 +425,17 @@ def forecast_prophet(model: Prophet, periods: int = 90,
     future = model.make_future_dataframe(periods=periods)
     
     # Tambahkan regressors untuk periode future jika ada
-    if future_regressors is not None:
+    # Get regressors dari model (gunakan metadata atau extra_regressors)
+    model_regressors = []
+    if hasattr(model, 'metadata') and 'regressors' in model.metadata:
+        model_regressors = model.metadata['regressors']
+    elif hasattr(model, 'extra_regressors'):
+        model_regressors = list(model.extra_regressors.keys())
+    
+    if future_regressors is not None and model_regressors:
         regressor_cols = [col for col in future_regressors.columns if col != 'ds']
         for col in regressor_cols:
-            if col in model.regressors:
+            if col in model_regressors:
                 # Merge dengan future dataframe
                 future = future.merge(
                     future_regressors[['ds', col]], 
@@ -703,31 +747,40 @@ def forecast_future(df: pd.DataFrame, ticker: str, periods: int = 90,
     # Buat future regressors (gunakan nilai terakhir atau rata-rata bergerak 3 hari terakhir)
     future_regressors = None
     if add_regressors and len(prophet_df) > 0:
-        # Get all regressor columns (fundamental + technical)
-        regressor_cols = [col for col in prophet_df.columns if col not in ['ds', 'y']]
+        # Get regressors dari model (gunakan metadata atau extra_regressors)
+        model_regressors = []
+        if hasattr(model, 'metadata') and 'regressors' in model.metadata:
+            model_regressors = model.metadata['regressors']
+        elif hasattr(model, 'extra_regressors'):
+            model_regressors = list(model.extra_regressors.keys())
+        else:
+            # Fallback: ambil dari prophet_df columns
+            model_regressors = [col for col in prophet_df.columns if col not in ['ds', 'y']]
         
-        if regressor_cols:
+        if model_regressors:
             # Ambil 3 hari terakhir untuk rata-rata bergerak
-            last_3_days = prophet_df[['ds'] + regressor_cols].tail(3).copy()
-            
-            # Buat dataframe untuk periode future
-            future_dates = pd.date_range(
-                start=prophet_df['ds'].max() + timedelta(days=1),
-                periods=periods,
-                freq='D'
-            )
-            future_regressors = pd.DataFrame({'ds': future_dates})
-            
-            # Fill regressors dengan rata-rata bergerak 3 hari terakhir atau nilai terakhir
-            for col in regressor_cols:
-                if len(last_3_days) >= 3:
-                    # Gunakan rata-rata bergerak 3 hari terakhir
-                    avg_value = last_3_days[col].mean()
-                else:
-                    # Gunakan nilai terakhir
-                    avg_value = last_3_days[col].iloc[-1]
+            available_regressors = [col for col in model_regressors if col in prophet_df.columns]
+            if available_regressors:
+                last_3_days = prophet_df[['ds'] + available_regressors].tail(3).copy()
                 
-                future_regressors[col] = avg_value
+                # Buat dataframe untuk periode future
+                future_dates = pd.date_range(
+                    start=prophet_df['ds'].max() + timedelta(days=1),
+                    periods=periods,
+                    freq='D'
+                )
+                future_regressors = pd.DataFrame({'ds': future_dates})
+                
+                # Fill regressors dengan rata-rata bergerak 3 hari terakhir atau nilai terakhir
+                for col in available_regressors:
+                    if len(last_3_days) >= 3:
+                        # Gunakan rata-rata bergerak 3 hari terakhir
+                        avg_value = last_3_days[col].mean()
+                    else:
+                        # Gunakan nilai terakhir
+                        avg_value = last_3_days[col].iloc[-1] if len(last_3_days) > 0 else 0
+                    
+                    future_regressors[col] = avg_value
     
     # Forecast dengan inverse log transformation
     forecast = forecast_prophet(

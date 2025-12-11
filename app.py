@@ -1277,139 +1277,8 @@ elif page == "🔍 Exploratory Data Analysis":
             except Exception as e:
                 safe_error(f"Error membuat line chart: {str(e)}")
             
-            # 2. Fundamental Divergence Chart (Dual-Axis)
-            st.subheader("2. Fundamental Divergence: Harga vs Kinerja Perusahaan")
-            
-            # Filter khusus untuk Fundamental Divergence
-            with st.expander("⚙️ Filter Visualisasi", expanded=False):
-                col1, col2 = st.columns(2)
-                with col1:
-                    divergence_height = st.slider("Chart Height", 300, 800, 500, 50, key="divergence_height")
-                    fundamental_metric = st.selectbox(
-                        "Fundamental Metric",
-                        ["ROE", "Net_Profit_Margin", "EBIT_Margin"],
-                        index=0,
-                        help="Pilih metrik fundamental untuk dibandingkan dengan harga",
-                        key="divergence_metric"
-                    )
-                with col2:
-                    show_divergence_zones = st.checkbox("Tampilkan Zona Divergence", value=True, key="divergence_zones")
-                    resample_divergence = st.selectbox(
-                        "Resample Frequency",
-                        ["None", "Weekly", "Monthly"],
-                        index=1,
-                        key="divergence_resample"
-                    )
-            
-            try:
-                if df_ts is not None and 'Close' in df_ts.columns and fundamental_metric in df_viz.columns:
-                    df_div = df_viz.copy()
-                    df_div['Date'] = pd.to_datetime(df_div['Date'])
-                    df_div = df_div.sort_values('Date')
-                    
-                    # Apply resample jika dipilih
-                    if resample_divergence == "Weekly":
-                        df_div = df_div.set_index('Date').resample('W').agg({
-                            'Close': 'last',
-                            fundamental_metric: 'mean'
-                        }).reset_index()
-                    elif resample_divergence == "Monthly":
-                        df_div = df_div.set_index('Date').resample('ME').agg({
-                            'Close': 'last',
-                            fundamental_metric: 'mean'
-                        }).reset_index()
-                    
-                    # Create figure with secondary y-axis
-                    fig_div = make_subplots(specs=[[{"secondary_y": True}]])
-                    
-                    # Price line (primary y-axis)
-                    fig_div.add_trace(
-                        go.Scatter(
-                            x=df_div['Date'],
-                            y=df_div['Close'],
-                            name='Harga Saham (Close)',
-                            line=dict(color='#1f77b4', width=2)
-                        ),
-                        secondary_y=False
-                    )
-                    
-                    # Fundamental metric line (secondary y-axis)
-                    fig_div.add_trace(
-                        go.Scatter(
-                            x=df_div['Date'],
-                            y=df_div[fundamental_metric],
-                            name=f'{fundamental_metric}',
-                            line=dict(color='#ff7f0e', width=2, dash='dash')
-                        ),
-                        secondary_y=True
-                    )
-                    
-                    # Highlight divergence zones
-                    if show_divergence_zones and len(df_div) > 1:
-                        df_div['Price_Change'] = df_div['Close'].pct_change()
-                        df_div['Fundamental_Change'] = df_div[fundamental_metric].pct_change()
-                        df_div['Divergence'] = df_div.apply(
-                            lambda row: 'Convergence' if (row['Price_Change'] >= 0 and row['Fundamental_Change'] >= 0) or 
-                                        (row['Price_Change'] < 0 and row['Fundamental_Change'] < 0)
-                            else 'Divergence', axis=1
-                        )
-                        
-                        # Add divergence annotations
-                        for i in range(1, len(df_div)):
-                            if df_div.iloc[i]['Divergence'] == 'Divergence':
-                                price_chg = df_div.iloc[i]['Price_Change']
-                                fund_chg = df_div.iloc[i]['Fundamental_Change']
-                                if price_chg > 0 and fund_chg < 0:
-                                    # Bubble warning
-                                    fig_div.add_annotation(
-                                        x=df_div.iloc[i]['Date'],
-                                        y=df_div.iloc[i]['Close'],
-                                        text="⚠️ Bubble",
-                                        showarrow=True,
-                                        arrowhead=2,
-                                        bgcolor="red",
-                                        font=dict(color="white", size=10)
-                                    )
-                                elif price_chg < 0 and fund_chg > 0:
-                                    # Opportunity
-                                    fig_div.add_annotation(
-                                        x=df_div.iloc[i]['Date'],
-                                        y=df_div.iloc[i]['Close'],
-                                        text="💎 Opportunity",
-                                        showarrow=True,
-                                        arrowhead=2,
-                                        bgcolor="green",
-                                        font=dict(color="white", size=10)
-                                    )
-                    
-                    fig_div.update_xaxes(title_text="Date")
-                    fig_div.update_yaxes(title_text="Harga Saham (USD)", secondary_y=False)
-                    fig_div.update_yaxes(title_text=f"{fundamental_metric} (%)", secondary_y=True)
-                    fig_div.update_layout(
-                        title=f"Fundamental Divergence: Harga vs {fundamental_metric}",
-                        hovermode='x unified',
-                        height=divergence_height
-                    )
-                    
-                    st.plotly_chart(fig_div, width='stretch', key=f'divergence_{selected_ticker_eda}')
-                    
-                    # Key Insight
-                    if len(df_div) > 1:
-                        recent_price_chg = df_div['Close'].pct_change().tail(10).mean()
-                        recent_fund_chg = df_div[fundamental_metric].pct_change().tail(10).mean()
-                        if recent_price_chg > 0 and recent_fund_chg > 0:
-                            safe_success("✅ **Key Insight**: Convergence terdeteksi! Harga naik dan fundamental naik = Kenaikan sehat (Fundamental driven).")
-                        elif recent_price_chg > 0 and recent_fund_chg < 0:
-                            safe_error("❌ **Key Insight**: Divergence (Bahaya)! Harga naik TAPI fundamental turun = Saham 'Gorengan' atau Bubble (Harga naik tanpa dukungan kinerja).")
-                        elif recent_price_chg < 0 and recent_fund_chg > 0:
-                            safe_info("💡 **Key Insight**: Opportunity! Harga turun TAPI fundamental naik = Saham Undervalued (Salah harga, peluang beli).")
-                else:
-                    safe_warning(f"Tidak dapat membuat fundamental divergence chart. Pastikan data memiliki kolom Date, Close, dan {fundamental_metric}.")
-            except Exception as e:
-                safe_error(f"Error membuat fundamental divergence chart: {str(e)}")
-            
-            # 3. Heatmap: Correlation Matrix Ratios (fokus ke ratios utama)
-            st.subheader("3. Correlation Matrix (Heatmap)")
+            # 2. Heatmap: Correlation Matrix Ratios (fokus ke ratios utama)
+            st.subheader("2. Correlation Matrix (Heatmap)")
             
             # Filter khusus untuk Correlation Heatmap
             with st.expander("⚙️ Filter Visualisasi", expanded=False):
@@ -1500,8 +1369,8 @@ elif page == "🔍 Exploratory Data Analysis":
             except Exception as e:
                 safe_error(f"Error membuat correlation heatmap: {str(e)}")
             
-            # 4. Volatility Band (Bollinger Band Style)
-            st.subheader("4. Volatility Band: Bollinger Band Style Analysis")
+            # 3. Volatility Band (Bollinger Band Style)
+            st.subheader("3. Volatility Band: Bollinger Band Style Analysis")
             
             # Filter khusus untuk Volatility Band
             with st.expander("⚙️ Filter Visualisasi", expanded=False):
@@ -1591,8 +1460,8 @@ elif page == "🔍 Exploratory Data Analysis":
             except Exception as e:
                 safe_error(f"Error membuat volatility band: {str(e)}")
             
-            # 5. Seasonal Heatmap Calendar (Bonus)
-            st.subheader("5. Seasonal Return Heatmap: Best Time to Buy?")
+            # 4. Seasonal Heatmap Calendar (Bonus)
+            st.subheader("4. Seasonal Return Heatmap: Best Time to Buy?")
             
             # Filter khusus untuk Seasonal Heatmap
             with st.expander("⚙️ Filter Visualisasi", expanded=False):
@@ -1625,112 +1494,9 @@ elif page == "🔍 Exploratory Data Analysis":
             except Exception as e:
                 safe_error(f"Error membuat seasonal heatmap: {str(e)}")
             
-            # 6. Financial Health Radar (Spider Chart)
-            st.subheader("6. Financial Health Radar: 5 Pilar Kesehatan Perusahaan")
-            
-            # Filter khusus untuk Financial Health Radar
-            with st.expander("⚙️ Filter Visualisasi", expanded=False):
-                col1, col2 = st.columns(2)
-                with col1:
-                    radar_height = st.slider("Chart Height", 400, 1000, 600, 50, key="radar_height")
-                    show_radar_fill = st.checkbox("Tampilkan Fill Area", value=True, key="radar_show_fill")
-                with col2:
-                    radar_normalize = st.checkbox("Normalize Values", value=True, help="Normalize untuk perbandingan yang lebih adil", key="radar_normalize")
-            
-            try:
-                # 5 Pilar: ROE, Asset Turnover, Current Ratio, Debt/Equity (inverted), Net Profit Margin
-                radar_metrics = {
-                    'ROE': 'ROE',
-                    'Asset_Turnover': 'Asset_Turnover',
-                    'Current_Ratio': 'Current_Ratio',
-                    'Debt_Equity_Ratio': 'Debt_Equity_Ratio',  # Will be inverted
-                    'Net_Profit_Margin': 'Net_Profit_Margin'
-                }
-                
-                available_metrics = {k: v for k, v in radar_metrics.items() if v in df_viz.columns}
-                
-                if len(available_metrics) >= 3:
-                    # Calculate average per ticker
-                    if 'Ticker' in df_viz.columns:
-                        df_radar = df_viz.groupby('Ticker').agg({
-                            'ROE': 'mean' if 'ROE' in df_viz.columns else 'first',
-                            'Asset_Turnover': 'mean' if 'Asset_Turnover' in df_viz.columns else 'first',
-                            'Current_Ratio': 'mean' if 'Current_Ratio' in df_viz.columns else 'first',
-                            'Debt_Equity_Ratio': 'mean' if 'Debt_Equity_Ratio' in df_viz.columns else 'first',
-                            'Net_Profit_Margin': 'mean' if 'Net_Profit_Margin' in df_viz.columns else 'first'
-                        }).reset_index()
-                    else:
-                        df_radar = pd.DataFrame({
-                            'Ticker': ['ALL'],
-                            'ROE': [df_viz['ROE'].mean()] if 'ROE' in df_viz.columns else [0],
-                            'Asset_Turnover': [df_viz['Asset_Turnover'].mean()] if 'Asset_Turnover' in df_viz.columns else [0],
-                            'Current_Ratio': [df_viz['Current_Ratio'].mean()] if 'Current_Ratio' in df_viz.columns else [0],
-                            'Debt_Equity_Ratio': [df_viz['Debt_Equity_Ratio'].mean()] if 'Debt_Equity_Ratio' in df_viz.columns else [0],
-                            'Net_Profit_Margin': [df_viz['Net_Profit_Margin'].mean()] if 'Net_Profit_Margin' in df_viz.columns else [0]
-                        })
-                    
-                    # Invert Debt/Equity (makin kecil makin bagus)
-                    if 'Debt_Equity_Ratio' in df_radar.columns:
-                        max_debt = df_radar['Debt_Equity_Ratio'].max()
-                        df_radar['Debt_Equity_Inverted'] = max_debt - df_radar['Debt_Equity_Ratio'] + 1
-                    
-                    # Normalize if requested
-                    if radar_normalize:
-                        for col in ['ROE', 'Asset_Turnover', 'Current_Ratio', 'Debt_Equity_Inverted', 'Net_Profit_Margin']:
-                            if col in df_radar.columns:
-                                max_val = df_radar[col].max()
-                                min_val = df_radar[col].min()
-                                if max_val > min_val:
-                                    df_radar[col] = (df_radar[col] - min_val) / (max_val - min_val) * 100
-                    
-                    # Create radar chart
-                    categories = ['ROE', 'Asset Turnover', 'Current Ratio', 'Debt/Equity (Inverted)', 'Net Profit Margin']
-                    
-                    fig_radar = go.Figure()
-                    
-                    for idx, row in df_radar.iterrows():
-                        values = [
-                            row.get('ROE', 0),
-                            row.get('Asset_Turnover', 0),
-                            row.get('Current_Ratio', 0),
-                            row.get('Debt_Equity_Inverted', 0),
-                            row.get('Net_Profit_Margin', 0)
-                        ]
-                        # Close the radar chart
-                        values.append(values[0])
-                        categories_closed = categories + [categories[0]]
-                        
-                        fig_radar.add_trace(go.Scatterpolar(
-                            r=values,
-                            theta=categories_closed,
-                            fill='toself' if show_radar_fill else None,
-                            name=row['Ticker']
-                        ))
-                    
-                    fig_radar.update_layout(
-                        polar=dict(
-                            radialaxis=dict(
-                                visible=True,
-                                range=[0, 100 if radar_normalize else None]
-                            )
-                        ),
-                        showlegend=True,
-                        title="Financial Health Radar: 5 Pilar Kesehatan Perusahaan",
-                        height=radar_height
-                    )
-                    
-                    st.plotly_chart(fig_radar, width='stretch', key=f'health_radar_{selected_ticker_eda}')
-                    
-                    # Key Insight
-                    safe_info("💡 **Key Insight**: Bentuk Segilima Penuh = Perusahaan Sempurna. Bentuk Gepeng/Penyok di satu sisi = Ada masalah fatal (misal: Profit tinggi tapi Hutang menumpuk).")
-                else:
-                    safe_warning("Tidak dapat membuat financial health radar. Pastikan data memiliki minimal 3 dari 5 kolom: ROE, Asset_Turnover, Current_Ratio, Debt_Equity_Ratio, Net_Profit_Margin.")
-            except Exception as e:
-                safe_error(f"Error membuat financial health radar: {str(e)}")
-            
-            # 7. Risk-Reward Quadrant (Scatter Plot)
+            # 5. Risk-Reward Quadrant (Scatter Plot)
             if 'Ticker' in df_viz.columns and df_viz['Ticker'].nunique() > 1:
-                st.subheader("7. Risk-Reward Quadrant: Pilih Saham Terbaik")
+                st.subheader("5. Risk-Reward Quadrant: Pilih Saham Terbaik")
                 
                 # Filter khusus untuk Risk-Reward Quadrant
                 with st.expander("⚙️ Filter Visualisasi", expanded=False):
@@ -1824,8 +1590,8 @@ elif page == "🔍 Exploratory Data Analysis":
                 except Exception as e:
                     safe_error(f"Error membuat risk-reward quadrant: {str(e)}")
             
-            # 8. Volume-Price Pressure Analysis
-            st.subheader("8. Volume-Price Pressure: Deteksi Akumulasi/Distribusi")
+            # 6. Volume-Price Pressure Analysis
+            st.subheader("6. Volume-Price Pressure: Deteksi Akumulasi/Distribusi")
             
             # Filter khusus untuk Volume-Price Pressure
             with st.expander("⚙️ Filter Visualisasi", expanded=False):
@@ -2055,6 +1821,14 @@ elif page == "🤖 Forecasting":
     if len(df_filtered_forecast) == 0:
         safe_warning("Tidak ada data untuk forecasting. Silakan pilih filter yang berbeda.")
     else:
+        # Option untuk skip hyperparameter tuning untuk speed
+        use_tuning = st.checkbox(
+            "⚡ Gunakan Hyperparameter Tuning (Lambat tapi Lebih Akurat)",
+            value=False,  # Default False untuk speed
+            help="Centang untuk tuning yang lebih akurat (akan lebih lambat ~5-10x). Biarkan kosong untuk training cepat.",
+            key="use_hyperparameter_tuning_checkbox"
+        )
+        
         # Train models button
         if st.button("🚀 Train Models", type="primary", use_container_width=True):
                 if 'Ticker' in df_filtered_forecast.columns:
@@ -2082,7 +1856,7 @@ elif page == "🤖 Forecasting":
                             st.session_state.df_processed,  # Gunakan data lengkap untuk training
                             split_date=st.session_state.split_date_str,
                             add_regressors=st.session_state.add_regressors,
-                            use_hyperparameter_tuning=True,  # Enable hyperparameter tuning
+                            use_hyperparameter_tuning=use_tuning,  # User bisa pilih untuk speed
                             n_jobs=max_jobs,
                             tickers_to_train=tickers_to_train  # Pass list ticker yang ingin di-train (sudah di-filter)
                         )
